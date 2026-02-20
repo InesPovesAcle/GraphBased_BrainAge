@@ -234,5 +234,5 @@ rows += [["APOE genotype", a, f"{apoe_counts[a]} ({apoe_perc[a]}%)"] for a in ap
 
 df_summary_habs = pd.DataFrame(rows, columns=["Category", "Value", "Count (%)"])
 
-print("--- SUMMARY TABLE (HABS; matched sessions) ---")
+print("--- SUMMARY TABLE (HABS; matched subjects) ---")
 print(df_summary_habs)
