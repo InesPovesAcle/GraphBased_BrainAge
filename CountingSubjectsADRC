@@ -177,12 +177,19 @@ else:
         print(f"{cat}:  {cnt} ({pct:.1f}%)")
     print()
 
+m["Sex_Label"] = m[COL_SEX].map({
+    1: "Male (M)",
+    2: "Female (F)",
+    "1": "Male (M)",
+    "2": "Female (F)"
+}).fillna(m[COL_SEX].astype(str))
+
 # === SEX ===
 print("=== SEX ===")
-if COL_SEX not in m.columns:
+if "Sex_Label" not in m.columns:
     print("NA (missing column)\n")
 else:
-    sx = m[COL_SEX].dropna().astype(str)
+    sx = m["Sex_Label"].dropna().astype(str)
     total = len(sx)
     if total == 0:
         print("NA\n")
@@ -192,13 +199,23 @@ else:
             pct = cnt / total * 100.0
             print(f"{cat}:  {cnt} ({pct:.1f}%)")
         print()
+        
+def normalize_apoe(x):
+    if pd.isna(x):
+        return np.nan
+    s = str(x).replace("/", "").strip()
+    if len(s) == 2:
+        a1, a2 = sorted([s[0], s[1]])
+        return f"APOE{a1}{a2}"
+    return s
+m["APOE_norm"] = m[COL_APOE].apply(normalize_apoe)
 
 # === APOE GENOTYPE ===
 print("=== APOE GENOTYPE ===")
-if COL_APOE not in m.columns:
+if "APOE_norm" not in m.columns:
     print("NA (missing column)\n")
 else:
-    ap = m[COL_APOE].dropna().astype(str)
+    ap = m["APOE_norm"].dropna().astype(str)
     total = len(ap)
     if total == 0:
         print("NA\n")
@@ -208,6 +225,10 @@ else:
             pct = cnt / total * 100.0
             print(f"{cat}:  {cnt} ({pct:.1f}%)")
         print()
+
+
+
+
 
 # --- SUMMARY TABLE (connectome + metadata) ---
 rows = []
@@ -223,8 +244,8 @@ if total > 0:
         rows.append(("Diagnostic group", cat, f"{cnt} ({cnt/total*100.0:.1f}%)"))
 
 # sex rows
-if COL_SEX in m.columns:
-    sx = m[COL_SEX].dropna().astype(str)
+if "Sex_Label" in m.columns:
+    sx = m["Sex_Label"].dropna().astype(str)
     total = len(sx)
     if total > 0:
         vc = sx.value_counts()
@@ -232,8 +253,8 @@ if COL_SEX in m.columns:
             rows.append(("Sex", cat, f"{cnt} ({cnt/total*100.0:.1f}%)"))
 
 # apoe rows
-if COL_APOE in m.columns:
-    ap = m[COL_APOE].dropna().astype(str)
+if "APOE_norm" in m.columns:
+    ap = m["APOE_norm"].dropna().astype(str)
     total = len(ap)
     if total > 0:
         vc = ap.value_counts()
