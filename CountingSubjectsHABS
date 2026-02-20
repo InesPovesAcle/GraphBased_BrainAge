@@ -1,0 +1,236 @@
+# =========================
+# HABS COUNTING SUBJECTS
+# (conn_plain from folder + metadata summary)
+# =========================
+
+import os
+import re
+import glob
+import random
+import numpy as np
+import pandas as pd
+import torch
+
+# ============ Reproducibility ============
+def seed_everything(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+seed_everything(42)
+
+
+# =========================
+# 1) LOAD HABS CONNECTOMES
+# =========================
+print("HABS CONNECTOMES (conn_plain only)\n")
+work_path='/mnt/newStor/paros/paros_WORK/'
+# Folder with CSVs (conn_plain + harmonized)
+connectome_dir = os.path.join(
+    os.environ["WORK"],
+    "ines/data/harmonization/HABS/connectomes/DWI/plain"
+)
+
+print("Folder:", connectome_dir)
+print("Exists:", os.path.exists(connectome_dir))
+print()
+
+# Find conn_plain only
+pattern = os.path.join(connectome_dir, "*_conn_plain.csv")
+conn_plain_files = sorted(glob.glob(pattern))
+
+print(f"Found conn_plain files: {len(conn_plain_files)}")
+
+# Load connectomes (dictionary runno -> matrix)
+connectomes = {}
+for fp in conn_plain_files:
+    base = os.path.basename(fp)
+    runno = base.replace("_conn_plain.csv", "")  # e.g., H4369_y0
+    try:
+        mat = pd.read_csv(fp, header=None)
+        connectomes[runno] = mat
+    except Exception as e:
+        print(f"WARNING: could not read {fp}: {e}")
+
+print(f"Valid conn_plain entries: {len(connectomes)}\n")
+
+
+# ---- Helpers: parse runno like H4369_y0 ----
+def parse_runno(runno: str):
+    """
+    Returns (subject_id_5digits or None, timepoint like 'y0'/'y2' or None)
+    """
+    m_sub = re.search(r"^H(\d+)", str(runno).strip(), flags=re.IGNORECASE)
+    subj = m_sub.group(1).zfill(5) if m_sub else None
+
+    m_tp = re.search(r"_y(\d+)", str(runno).strip(), flags=re.IGNORECASE)
+    tp = f"y{m_tp.group(1)}" if m_tp else None
+
+    return subj, tp
+
+
+# ===== Connectome counts per subject/timepoint =====
+all_runno = list(connectomes.keys())
+parsed = [parse_runno(r) for r in all_runno]
+subj_ids = [p[0] for p in parsed if p[0] is not None]
+timepoints = [p[1] for p in parsed if p[1] is not None]
+
+unique_subjects = sorted(set(subj_ids))
+print(f"Unique subjects (H####): {len(unique_subjects)}\n")
+
+tp_counts = pd.Series(timepoints).value_counts()
+print("Connectomes per timepoint (Y):")
+for tp, n in tp_counts.items():
+    print(f"{tp}: {n}")
+print()
+
+# per-subject set of timepoints
+tp_per_subj = {}
+for r in all_runno:
+    s, tp = parse_runno(r)
+    if s is None:
+        continue
+    tp_per_subj.setdefault(s, set()).add(tp)
+
+# Explicit y0 / y2 counts (and both), but also handle other years gracefully
+subjects_with_y0 = {s for s, tps in tp_per_subj.items() if "y0" in tps}
+subjects_with_y2 = {s for s, tps in tp_per_subj.items() if "y2" in tps}
+subjects_with_both_y0_y2 = subjects_with_y0.intersection(subjects_with_y2)
+
+print(f"Subjects with y0: {len(subjects_with_y0)}")
+print(f"Subjects with y2: {len(subjects_with_y2)}")
+print(f"Subjects with BOTH y0 & y2: {len(subjects_with_both_y0_y2)}\n")
+
+# distribution of number of timepoints per subject
+tp_n = pd.Series([len(tps) for tps in tp_per_subj.values()]).value_counts().sort_index()
+print("#timepoints per subject:")
+for k, v in tp_n.items():
+    print(f"{k} timepoints: {v} subjects")
+print()
+
+
+# =========================
+metadata_path = os.path.join(
+    os.environ["WORK"],
+    "ines/data/harmonization/HABS/metadata/early_v1_HABS_maestro_metadata.xlsx")
+
+
+df_metadata = pd.read_excel(metadata_path)
+
+print(f"Metadata loaded: {df_metadata.shape[0]} rows")
+if "Subject" in df_metadata.columns:
+    print(f"Unique subjects in metadata (Subject): {df_metadata['Subject'].nunique(dropna=True)}")
+print()
+
+# Basic cleaning: require runno
+df_metadata_cleaned = df_metadata.dropna(subset=["runno"]).copy()
+df_metadata_cleaned["runno_fixed"] = df_metadata_cleaned["runno"].astype(str).str.strip()
+
+# Match metadata to available connectomes by runno
+available_runno = set(connectomes.keys())
+matched_metadata = df_metadata_cleaned[df_metadata_cleaned["runno_fixed"].isin(available_runno)].copy()
+
+print(f"Matched sessions (metadata & connectome): {len(matched_metadata)} out of {len(available_runno)}")
+if "Subject" in matched_metadata.columns:
+    print(f"Matched unique subjects (Subject): {matched_metadata['Subject'].nunique(dropna=True)}")
+print()
+
+
+# =========================
+# 3) SUMMARY LIKE ADDECODE
+# =========================
+
+# Columns expected from your file:
+# Age -> "Age"
+# Sex -> "Sex"
+# DX  -> "CDX_Cog"  (numeric)
+# APOE -> "APOE4_Genotype" (e.g., E3E4)
+print("Usando columnas:")
+print("  SEX:", "Sex")
+print("  DX :", "CDX_Cog")
+print("  AGE:", "Age")
+print("APOE column:", "APOE4_Genotype")
+print()
+
+df = matched_metadata.copy()
+
+# ---- DX mapping (ajusta si tu definición es distinta) ----
+dx_map = {0: "CN", 1: "MCI", 2: "AD/Dementia", 9: "Other/Unknown"}
+df["DX_Label"] = df["CDX_Cog"].map(dx_map).fillna("Other/Unknown")
+
+# ---- Sex labels ----
+df["Sex_Label"] = df["Sex"].map({"F": "Female (F)", "M": "Male (M)"}).fillna(df["Sex"].astype(str))
+
+# ---- APOE normalization to APOE33/APOE34/etc (si ya viene así, se respeta) ----
+def normalize_apoe(x):
+    if pd.isna(x):
+        return np.nan
+    s = str(x).strip().upper().replace("/", "").replace("-", "")
+    # if already APOE33 etc:
+    m = re.match(r"APOE(\d)(\d)$", s)
+    if m:
+        return f"APOE{m.group(1)}{m.group(2)}"
+
+    # common formats: E3E4, e3e4, 3/4, 34, etc
+    # extract two allele numbers 2/3/4
+    alleles = re.findall(r"[234]", s)
+    if len(alleles) >= 2:
+        a1, a2 = alleles[0], alleles[1]
+        pair = "".join(sorted([a1, a2]))
+        return f"APOE{pair}"
+    return s  # fallback
+
+df["APOE_norm"] = df["APOE4_Genotype"].apply(normalize_apoe) if "APOE4_Genotype" in df.columns else np.nan
+
+# ---- Age stats ----
+age = pd.to_numeric(df["Age"], errors="coerce")
+age_mean = age.mean()
+age_std  = age.std()
+age_min, age_max = age.min(), age.max()
+
+# ---- Counts & % ----
+dx_counts = df["DX_Label"].value_counts()
+dx_perc   = (dx_counts / len(df) * 100).round(1)
+
+sex_counts = df["Sex_Label"].value_counts()
+sex_perc   = (sex_counts / len(df) * 100).round(1)
+
+apoe_counts = df["APOE_norm"].value_counts(dropna=True)
+apoe_perc   = (apoe_counts / len(df) * 100).round(1)
+
+print("=== AGE ===")
+print(f"Mean ± SD : {age_mean:.2f} ± {age_std:.2f}")
+print(f"Range     : [{age_min:.1f}, {age_max:.1f}]\n")
+
+print("=== DIAGNOSTIC GROUP ===")
+for grp, n in dx_counts.items():
+    print(f"{grp:<12}: {n:3d} ({dx_perc[grp]}%)")
+print()
+
+print("=== SEX ===")
+for sx, n in sex_counts.items():
+    print(f"{sx:<11}: {n:3d} ({sex_perc[sx]}%)")
+print()
+
+print("=== APOE GENOTYPE ===")
+for gt, n in apoe_counts.items():
+    print(f"{gt:<7}: {n:3d} ({apoe_perc[gt]}%)")
+print()
+
+# ---- Summary table (like your ADDECODE output) ----
+rows = [
+    ["Age", "Mean ± SD", f"{age_mean:.2f} ± {age_std:.2f}"],
+    ["Age", "Range",     f"[{age_min:.1f}, {age_max:.1f}]"],
+]
+rows += [["Diagnostic group", g, f"{dx_counts[g]} ({dx_perc[g]}%)"] for g in dx_counts.index]
+rows += [["Sex", s, f"{sex_counts[s]} ({sex_perc[s]}%)"] for s in sex_counts.index]
+rows += [["APOE genotype", a, f"{apoe_counts[a]} ({apoe_perc[a]}%)"] for a in apoe_counts.index]
+
+df_summary_habs = pd.DataFrame(rows, columns=["Category", "Value", "Count (%)"])
+
+print("--- SUMMARY TABLE (HABS; matched sessions) ---")
+print(df_summary_habs)
