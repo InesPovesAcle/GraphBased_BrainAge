@@ -1,0 +1,256 @@
+import os
+import re
+import pandas as pd
+import numpy as np
+
+work_path='/mnt/newStor/paros/paros_WORK/'
+
+CONNECTOME_DIR = os.path.join(
+    os.environ["WORK"],
+    "ines/data/harmonization/ADRC/connectomes/DWI/plain")
+
+METADATA_XLSX = os.path.join(
+    os.environ["WORK"],
+    "ines/data/harmonization/ADRC/metadata/alex-badea_2024-06-14.xlsx")
+
+METADATA_SHEET = 0
+METADATA_ID_COL = "PTID"
+
+CONNECTOME_SUFFIX = "_conn_plain.csv"
+ID_REGEX = r"(ADRC\d{4})"
+
+REQUIRE_SQUARE = True
+DROP_NAN = True
+
+# ===== columnas tipo ADDECODE (del excel ADRC) =====
+COL_AGE  = "SUBJECT_AGE_SCREEN"
+COL_SEX  = "SUBJECT_SEX"
+COL_APOE = "APOE"
+
+# diagnóstico derivado desde flags (si existen)
+COL_NORM = "NORMCOG"
+COL_MCI  = "IMPNOMCI"
+COL_DEM  = "DEMENTED"
+
+print("\nADRC CONNECTOMES\n")
+print(CONNECTOME_DIR)
+print(os.path.exists(CONNECTOME_DIR))
+
+files = []
+for fn in os.listdir(CONNECTOME_DIR):
+    if fn.endswith(CONNECTOME_SUFFIX) and fn.lower().endswith(".csv"):
+        files.append(os.path.join(CONNECTOME_DIR, fn))
+
+print(f"Total connectome files found: {len(files)}")
+
+kept_files = []
+dropped_files = []
+
+for fp in files:
+    ok = True
+    mat = None
+
+    try:
+        mat = np.loadtxt(fp, delimiter=",")
+    except Exception:
+        try:
+            df = pd.read_csv(fp)
+            mat = df.values
+        except Exception:
+            ok = False
+
+    if ok and isinstance(mat, np.ndarray):
+        if mat.ndim != 2:
+            ok = False
+        if ok and REQUIRE_SQUARE and mat.shape[0] != mat.shape[1]:
+            ok = False
+        if ok and DROP_NAN and np.isnan(mat).any():
+            ok = False
+    else:
+        ok = False
+
+    if ok:
+        kept_files.append(fp)
+    else:
+        dropped_files.append(fp)
+
+print(f"Total connectomes after filtering: {len(kept_files)}")
+if len(dropped_files) > 0:
+    print(f"Dropped (invalid matrix): {len(dropped_files)} (showing up to 5)")
+    for x in dropped_files[:5]:
+        print("  ", os.path.basename(x))
+print()
+
+conn_rows = []
+for fp in kept_files:
+    base = os.path.basename(fp)
+    m = re.search(ID_REGEX, base, flags=re.IGNORECASE)
+    if m:
+        sid = m.group(1).strip().upper()
+        conn_rows.append({"ID": sid, "connectome_file": fp})
+
+conn_df = pd.DataFrame(conn_rows).dropna(subset=["ID"]).drop_duplicates(subset=["ID"])
+conn_ids = set(conn_df["ID"].tolist())
+
+print("ADRC METADATA\n")
+meta = pd.read_excel(METADATA_XLSX, sheet_name=METADATA_SHEET)
+print(f"Metadata loaded: {meta.shape[0]} rows")
+
+if METADATA_ID_COL not in meta.columns:
+    raise KeyError(
+        f"Column '{METADATA_ID_COL}' not found in metadata. "
+        f"Available columns: {list(meta.columns)}"
+    )
+
+meta = meta.copy()
+meta["ID"] = meta[METADATA_ID_COL].astype(str).str.strip().str.upper().str.replace(r"\s+", "", regex=True)
+meta = meta.dropna(subset=["ID"])
+print(f"After cleaning: {meta.shape[0]} rows\n")
+
+meta_ids = set(meta["ID"].tolist())
+
+print("MATCHING CONNECTOMES WITH METADATA")
+matched = sorted(list(conn_ids.intersection(meta_ids)))
+print(f"Matched subjects (metadata & connectome): {len(matched)} out of {len(conn_ids)}\n")
+
+conn_no_meta = sorted(list(conn_ids.difference(meta_ids)))
+meta_no_conn = sorted(list(meta_ids.difference(conn_ids)))
+
+print(f"Subjects with connectome but NO metadata: {len(conn_no_meta)}")
+if len(conn_no_meta) > 0:
+    print("  Example (up to 15):", conn_no_meta[:15])
+print()
+
+print(f"Subjects with metadata but NO connectome: {len(meta_no_conn)}")
+
+
+# ============================================================
+# ADDECODE-LIKE SUMMARY (sobre sujetos con connectome+metadata)
+# ============================================================
+
+m = meta[meta["ID"].isin(matched)].copy()
+
+# derivar Diagnostic_group desde flags (si no están, queda Unknown)
+for c in [COL_NORM, COL_MCI, COL_DEM]:
+    if c not in m.columns:
+        m[c] = np.nan
+
+m["Diagnostic_group"] = "Unknown"
+m.loc[pd.to_numeric(m[COL_NORM], errors="coerce") == 1, "Diagnostic_group"] = "Normal"
+m.loc[pd.to_numeric(m[COL_MCI], errors="coerce") == 1, "Diagnostic_group"] = "MCI"
+m.loc[pd.to_numeric(m[COL_DEM], errors="coerce") == 1, "Diagnostic_group"] = "Demented"
+
+# === AGE ===
+print("=== AGE ===")
+if COL_AGE not in m.columns:
+    print("Mean ± SD : NA (missing column)")
+    print("Range     : NA\n")
+    mean_sd_str = "NA"
+    range_str = "NA"
+else:
+    age = pd.to_numeric(m[COL_AGE], errors="coerce").dropna()
+    if len(age) == 0:
+        print("Mean ± SD : NA")
+        print("Range     : NA\n")
+        mean_sd_str = "NA"
+        range_str = "NA"
+    else:
+        mean = float(age.mean())
+        sd = float(age.std(ddof=1)) if len(age) > 1 else 0.0
+        mn = float(age.min())
+        mx = float(age.max())
+        mean_sd_str = f"{mean:.2f} ± {sd:.2f}"
+        range_str = f"[{mn:.1f}, {mx:.1f}]"
+        print(f"Mean ± SD : {mean_sd_str}")
+        print(f"Range     : {range_str}\n")
+
+# === DIAGNOSTIC GROUP ===
+print("=== DIAGNOSTIC GROUP ===")
+dg = m["Diagnostic_group"].dropna().astype(str)
+total = len(dg)
+if total == 0:
+    print("NA\n")
+else:
+    vc = dg.value_counts()
+    for cat, cnt in vc.items():
+        pct = cnt / total * 100.0
+        print(f"{cat}:  {cnt} ({pct:.1f}%)")
+    print()
+
+# === SEX ===
+print("=== SEX ===")
+if COL_SEX not in m.columns:
+    print("NA (missing column)\n")
+else:
+    sx = m[COL_SEX].dropna().astype(str)
+    total = len(sx)
+    if total == 0:
+        print("NA\n")
+    else:
+        vc = sx.value_counts()
+        for cat, cnt in vc.items():
+            pct = cnt / total * 100.0
+            print(f"{cat}:  {cnt} ({pct:.1f}%)")
+        print()
+
+# === APOE GENOTYPE ===
+print("=== APOE GENOTYPE ===")
+if COL_APOE not in m.columns:
+    print("NA (missing column)\n")
+else:
+    ap = m[COL_APOE].dropna().astype(str)
+    total = len(ap)
+    if total == 0:
+        print("NA\n")
+    else:
+        vc = ap.value_counts()
+        for cat, cnt in vc.items():
+            pct = cnt / total * 100.0
+            print(f"{cat}:  {cnt} ({pct:.1f}%)")
+        print()
+
+# --- SUMMARY TABLE (connectome + metadata) ---
+rows = []
+rows.append(("Age", "Mean ± SD", mean_sd_str))
+rows.append(("Age", "Range", range_str))
+
+# diagnostic group rows
+dg = m["Diagnostic_group"].dropna().astype(str)
+total = len(dg)
+if total > 0:
+    vc = dg.value_counts()
+    for cat, cnt in vc.items():
+        rows.append(("Diagnostic group", cat, f"{cnt} ({cnt/total*100.0:.1f}%)"))
+
+# sex rows
+if COL_SEX in m.columns:
+    sx = m[COL_SEX].dropna().astype(str)
+    total = len(sx)
+    if total > 0:
+        vc = sx.value_counts()
+        for cat, cnt in vc.items():
+            rows.append(("Sex", cat, f"{cnt} ({cnt/total*100.0:.1f}%)"))
+
+# apoe rows
+if COL_APOE in m.columns:
+    ap = m[COL_APOE].dropna().astype(str)
+    total = len(ap)
+    if total > 0:
+        vc = ap.value_counts()
+        for cat, cnt in vc.items():
+            rows.append(("APOE genotype", cat, f"{cnt} ({cnt/total*100.0:.1f}%)"))
+
+summary = pd.DataFrame(rows, columns=["Category", "Value", "Count (%)"])
+print("--- SUMMARY TABLE (connectome + metadata) ---")
+print(summary)
+
+# ============================================================
+# Guardar outputs
+# ============================================================
+pd.DataFrame({"ID": matched}).to_csv("ADRC_matched_connectome_metadata_IDs.csv", index=False)
+conn_df.to_csv("ADRC_connectome_files_with_ID.csv", index=False)
+summary.to_csv("ADRC_summary_table_connectome_metadata.csv", index=False)
+
+print("\nSaved: ADRC_matched_connectome_metadata_IDs.csv")
+print("Saved: ADRC_connectome_files_with_ID.csv")
+print("Saved: ADRC_summary_table_connectome_metadata.csv\n")
