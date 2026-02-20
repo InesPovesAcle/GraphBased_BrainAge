@@ -304,3 +304,4 @@ df_summary_pca = pd.DataFrame(rows, columns=["Category", "Value", "Count (%)"])
 print("\n--- SUMMARY TABLE (connectome + PCA) ---")
 print(df_summary_pca)
 
+
