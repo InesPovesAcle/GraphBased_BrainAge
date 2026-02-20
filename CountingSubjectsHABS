@@ -156,7 +156,8 @@ print("  AGE:", "Age")
 print("APOE column:", "APOE4_Genotype")
 print()
 
-df = matched_metadata.copy()
+# ---- Use ONE row per subject (like ADNI & ADDECODE) ----
+df = matched_metadata.drop_duplicates(subset=["Subject"]).copy()
 
 # ---- DX mapping (ajusta si tu definición es distinta) ----
 dx_map = {0: "CN", 1: "MCI", 2: "AD/Dementia", 9: "Other/Unknown"}
@@ -220,6 +221,7 @@ print("=== APOE GENOTYPE ===")
 for gt, n in apoe_counts.items():
     print(f"{gt:<7}: {n:3d} ({apoe_perc[gt]}%)")
 print()
+# ---- Use ONE row per subject (like ADNI & ADDECODE) ----
 
 # ---- Summary table (like your ADDECODE output) ----
 rows = [
