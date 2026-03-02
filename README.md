@@ -76,4 +76,16 @@ It reproduces the same preprocessing and graph construction pipeline used during
 Computes performance metrics: RMSE, MAE and R²
 
 4. Adds regression statistics (R² and p-value) to BAG vs Age and cBAG vs Age plots.
+   
+Saved to:
+$WORK/ines/results/results_with_bias_correction_all_subjects/
 
+Generated files:
+brain_age_predictions_all_subjects_bias_corrected.csv
+→ Subject-level predictions with Age, Predicted_Age, BAG, cBAG, and metadata.
+model_performance_metrics.txt
+→ RMSE, MAE, R².
+plot_BAG_vs_Age.png
+→ BAG vs Age with regression line, R² and p-value.
+plot_cBAG_vs_Age.png
+→ Corrected BAG vs Age with regression line, R² and p-value.
