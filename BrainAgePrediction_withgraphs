@@ -1,3 +1,11 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Feb 17 11:09:57 2026
+
+@author: ines
+"""
+
 ###################################################################
 # ADDECODE - Preprocessing, Training and evaluation on all healthy
 ###################################################################
@@ -6,7 +14,6 @@
 # Convert each subject into a pytorch graph object 
 # Trains a GATv2 model asiing 7 fold stratified CV - 10 repeats 
 # Evaluate model performance and save the model to predict on all risks
-
 
 
 #Preprocess connectomes -> Log(x+1) and Threshold
@@ -29,7 +36,7 @@
     # Residual connections between 1 and 2,2 and 3, 3 and 4​
     # Batch norm​
     # Concat true, heads 8​
-    # Patience 40 ​
+    # Patience 40 ​que hace este codigo:
     
 
     
@@ -84,7 +91,11 @@ results_dir.mkdir(exist_ok=True)
 
 print("Results will be saved in:", results_dir)
 '''
-
+OUT_DIR = os.path.join(os.environ["WORK"], "ines/results/addecode_training_eval_plots_save/")
+os.makedirs(OUT_DIR, exist_ok=True)
+CKPT_DIR = os.path.join(OUT_DIR, "cv_checkpoints")
+os.makedirs(CKPT_DIR, exist_ok=True)
+print("Outputs will be saved to:", OUT_DIR)
 ####################### CONNECTOMES ###############################
 print("ADDECODE CONNECTOMES\n")
 work_path='/mnt/newStor/paros/paros_WORK/'
@@ -537,7 +548,7 @@ def compute_nodewise_clustering_coefficients(matrix):
     Compute clustering coefficient for each node in the connectome matrix.
     
     Parameters:
-        matrix (pd.DataFrame): 84x84 connectivity matrix
+        matrix (pd.DataFrame): 84x84 connectivity matrixque hace este codigo:
     
     Returns:
         torch.Tensor: Tensor of shape [84, 1] with clustering coefficient per node
@@ -788,7 +799,10 @@ for subject, matrix_log in log_thresholded_connectomes.items():
 
 # === Save processed graph data for reuse
 import torch
-torch.save(graph_data_list_addecode, "graph_data_list_addecode.pt")
+torch.save(
+    graph_data_list_addecode,
+    os.path.join(OUT_DIR, "graph_data_list_addecode.pt")
+)
 print("Saved: graph_data_list_addecode.pt")
 
 
@@ -1113,7 +1127,11 @@ for fold, (train_idx, test_idx) in enumerate(skf.split(graph_data_list_addecode,
             if test_loss < best_loss:
                 best_loss = test_loss
                 patience_counter = 0
-                torch.save(model.state_dict(), f"model_fold_{fold+1}_rep_{repeat+1}.pt")
+                ckpt_path = os.path.join(
+                    CKPT_DIR,
+                    f"model_fold_{fold+1}_rep_{repeat+1}.pt"
+                    )
+                torch.save(model.state_dict(), ckpt_path)
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
@@ -1234,8 +1252,13 @@ for fold, (train_idx, test_idx) in enumerate(skf.split(graph_data_list_addecode,
 
         model = BrainAgeGATv2(global_feat_dim=16).to(device)  
 
+        ckpt_path = os.path.join(
+            CKPT_DIR,
+            f"model_fold_{fold+1}_rep_{rep+1}.pt"
+            )
+
         state_dict = torch.load(
-            f"model_fold_{fold+1}_rep_{rep+1}.pt",
+            ckpt_path,
             weights_only=True
         )
         model.load_state_dict(state_dict)
@@ -1289,10 +1312,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from torch_geometric.loader import DataLoader
 
 # ---------------------------  CONFIG  ---------------------------
-OUT_DIR = os.path.join(os.environ["WORK"], "ines/results/addecode_training_eval_plots_save/")
-os.makedirs(OUT_DIR, exist_ok=True)
 
-print("Outputs will be saved to:", OUT_DIR)
 
 
 BATCH_SIZE       = 6                                 # must match training
@@ -1334,7 +1354,10 @@ for fold, (train_idx, test_idx) in enumerate(skf_addecode.split(
 
         # ----- Load trained model -----
         model = BrainAgeGATv2(global_feat_dim=16).to(device)
-        ckpt_path = f"model_fold_{fold+1}_rep_{rep+1}.pt"
+        ckpt_path = os.path.join(
+            CKPT_DIR,
+            f"model_fold_{fold+1}_rep_{rep+1}.pt"
+            )
         model.load_state_dict(torch.load(
             ckpt_path,
             weights_only=True
@@ -1605,7 +1628,10 @@ for epoch in range(epochs):
 
 
 # Save model after full training
-torch.save(final_model.state_dict(), "model_trained_on_all_healthy.pt")
+torch.save(
+    final_model.state_dict(),
+    os.path.join(OUT_DIR, "model_trained_on_all_healthy.pt")
+)
 print("\nFinal model saved as 'model_trained_on_all_healthy.pt'")
 
 
