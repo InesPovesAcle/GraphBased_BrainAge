@@ -54,7 +54,6 @@ import time
 import torch
 import random
 import numpy as np
-
 import networkx as nx  # For graph-level metrics
 import warnings
 
@@ -103,7 +102,9 @@ results_dir.mkdir(exist_ok=True)
 
 print("Results will be saved in:", results_dir)
 '''
-
+OUT_DIR = os.path.join(os.environ["WORK"], "ines/results/results_with_bias_correction")
+os.makedirs(OUT_DIR, exist_ok=True)
+print("Outputs will be saved to:", OUT_DIR)
 ####################### CONNECTOMES ###############################
 print("ADDECODE CONNECTOMES\n")
 work_path='/mnt/newStor/paros/paros_WORK/'
@@ -807,7 +808,7 @@ for subject, matrix_log in log_thresholded_connectomes.items():
 
 # === Save processed graph data for reuse
 import torch
-torch.save(graph_data_list_addecode, "graph_data_list_addecode.pt")
+torch.save(graph_data_list_addecode, os.path.join(OUT_DIR, "graph_data_list_addecode.pt"))
 print("Saved: graph_data_list_addecode.pt")
 
 
@@ -1260,10 +1261,7 @@ from torch_geometric.loader import DataLoader
 from sklearn.linear_model import LinearRegression
 
 # ---------------------------  CONFIG  ---------------------------
-OUT_DIR = os.path.join(os.environ["WORK"], "ines/results/addecode_training_eval_plots_save/")
-os.makedirs(OUT_DIR, exist_ok=True)
 
-print("Outputs will be saved to:", OUT_DIR)
 
 
 BATCH_SIZE       = 6                                 # must match training
@@ -1735,8 +1733,8 @@ for epoch in range(epochs):
 
 
 # Save model after full training
-torch.save(final_model.state_dict(), "model_trained_on_all_healthy.pt")
-print("\nFinal model saved as 'model_trained_on_all_healthy.pt'")
+torch.save(final_model.state_dict(), os.path.join(OUT_DIR, "model_trained_on_all_healthy_corrected.pt"))
+print("\nFinal model saved as 'model_trained_on_all_healthy_corrected.pt'")
 
 # ==========================================================
 # RESULTS SUMMARY: subject-level (clean) + performance + stability
@@ -1754,9 +1752,6 @@ from sklearn.linear_model import LinearRegression
 # CONFIG: paths
 # -------------------------
 # Use your existing OUT_DIR if it exists; otherwise set manually
-if "OUT_DIR" not in globals():
-    OUT_DIR = "/mnt/newStor/paros/paros_WORK/ines/results/addecode_training_eval_plots_save/"
-os.makedirs(OUT_DIR, exist_ok=True)
 
 pred_path = os.path.join(OUT_DIR, "cv_predictions_addecode.csv")
 if not os.path.exists(pred_path):
@@ -1834,10 +1829,75 @@ if "cBAG" in df.columns:
                cBAG_std=("cBAG", "std"))
     )
     df_subject = df_subject.merge(df_subject2, on="Subject_ID", how="left")
-
 subject_out = os.path.join(OUT_DIR, "subject_level_predictions_clean.csv")
 df_subject.to_csv(subject_out, index=False)
 print("Saved subject-level clean results:", subject_out)
+
+# ==========================================================
+# AUC: APOE4 carrier (yes/no) usando subject-level scores
+# ==========================================================
+from sklearn.metrics import roc_auc_score, roc_curve
+
+# 1) Construir etiqueta APOE4 desde metadata original (string)
+# OJO: aquí usamos addecode_healthy_metadata_pca (ya lo tienes en memoria)
+# pero necesitas el genotype ORIGINAL, no el label-encoded.
+# Si en addecode_healthy_metadata_pca perdiste el string, usa df_metadata_PCA_healthy_withConnectome
+# que venía del merge antes del LabelEncoder.
+if "genotype" in df_metadata_PCA_healthy_withConnectome.columns:
+    geno_src = df_metadata_PCA_healthy_withConnectome[["MRI_Exam_fixed", "genotype"]].copy()
+else:
+    raise KeyError("No encuentro genotype string en df_metadata_PCA_healthy_withConnectome")
+
+geno_src["genotype_str"] = geno_src["genotype"].astype(str).str.lower()
+geno_src["APOE4"] = geno_src["genotype_str"].str.contains("4").astype(int)
+
+# --- FIX: igualar tipos/formatos de ID para el merge ---
+df_subject["Subject_ID"] = df_subject["Subject_ID"].astype(str).str.zfill(5)
+geno_src["MRI_Exam_fixed"] = geno_src["MRI_Exam_fixed"].astype(str).str.zfill(5)
+geno_src = geno_src.drop_duplicates(subset="MRI_Exam_fixed")  # por si acaso
+
+# 2) Merge con df_subject (1 fila por sujeto)
+df_auc = df_subject.merge(geno_src[["MRI_Exam_fixed", "APOE4"]],
+                          left_on="Subject_ID", right_on="MRI_Exam_fixed", how="inner")
+
+print("df_subject N:", len(df_subject))
+print("geno_src N unique:", geno_src["MRI_Exam_fixed"].nunique())
+print("df_auc N merged:", len(df_auc))
+
+score_col = "cBAG_global_mean"   # recomendado
+y = df_auc["APOE4"].values
+s = df_auc[score_col].values
+
+# 3) AUC + ROC curve
+if y.min() == y.max():
+    print("No puedo calcular AUC APOE4: solo hay una clase en los datos.")
+else:
+    auc_apoe4 = roc_auc_score(y, s)
+    fpr, tpr, _ = roc_curve(y, s)
+    print(f"\nROC-AUC APOE4 (score={score_col}): {auc_apoe4:.3f} | N={len(df_auc)} | Pos={int(y.sum())}")
+
+    plt.figure(figsize=(6, 6))
+    plt.plot(fpr, tpr, label=f"AUC={auc_apoe4:.3f}")
+    plt.plot([0, 1], [0, 1], linestyle="--")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC: APOE4 carrier vs non-carrier")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+
+    out_png = os.path.join(OUT_DIR, "roc_auc_apoe4.png")
+    plt.savefig(out_png, dpi=300, bbox_inches="tight")
+    plt.close()
+    print("Saved ROC plot:", out_png)
+
+    # Guardar también en CSV por si quieres reportarlo
+    out_txt = os.path.join(OUT_DIR, "roc_auc_apoe4.txt")
+    with open(out_txt, "w") as f:
+        f.write(f"AUC_APOE4={auc_apoe4:.6f}\n")
+        f.write(f"Score={score_col}\n")
+        f.write(f"N={len(df_auc)} Pos={int(y.sum())}\n")
+    print("Saved AUC summary:", out_txt)
 
 # ==========================================================
 # 2) MODEL PERFORMANCE (recommended: subject-level OOF mean)
