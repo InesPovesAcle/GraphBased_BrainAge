@@ -46,18 +46,34 @@ This cript adds to the previous one:
 
 Outputs are saved to: $WORK/ines/results/results_with_bias_correction/
     - cv_predictions_addecode.csv → predictions + BAG, cBAG, and cBAG_global
-    
     - bias_coefficients_per_fold_repeat.csv → slope/intercept per fold×repeat
-    
     - subject_level_predictions_clean.csv → one row per subject (mean/std across repeats)
-    
     - metrics_per_fold_repeat.csv + stability_summary_fold_repeat.csv → model stability summaries
-    
     - plot_subject_level_pred_vs_real.png, plot_subject_level_cBAG_global_hist.png, plot_stability_mae_hist.png → summary plots
-    
     - model_trained_on_all_healthy_corrected.pt → final model trained on all healthy subjects (bias-correction pipeline)
 
 
+**BrainAgePrediction_AllSubjects**
 
+This script applies the final brain-age model trained on healthy controls to the entire AD-DECODE cohort (healthy + risk groups).
 
+It reproduces the same preprocessing and graph construction pipeline used during training, ensuring that:
+
+ - All node feature normalization (FA, MD, Volume) is computed using healthy controls only, then applied to all subjects.
+
+ - All global feature z-scoring (clinical + graph metrics + PCA) uses healthy-derived statistics to prevent data leakage.
+
+1. Loads the pretrained model: model_trained_on_all_healthy_corrected.pt (the one with bias correction done in BrainAgePrediction_withbias
+
+2. Predicts brain age for all subjects.
+
+3. Computes:
+
+    - BAG = Predicted Age − Chronological Age
+
+    - cBAG = bias-corrected BAG (linear regression: BAG ~ Age)
+
+Computes performance metrics: RMSE, MAE and R²
+
+4. Adds regression statistics (R² and p-value) to BAG vs Age and cBAG vs Age plots.
 
