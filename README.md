@@ -46,10 +46,15 @@ This cript adds to the previous one:
 
 Outputs are saved to: $WORK/ines/results/results_with_bias_correction/
     - cv_predictions_addecode.csv → predictions + BAG, cBAG, and cBAG_global
+    
     - bias_coefficients_per_fold_repeat.csv → slope/intercept per fold×repeat
+    
     - subject_level_predictions_clean.csv → one row per subject (mean/std across repeats)
+    
     - metrics_per_fold_repeat.csv + stability_summary_fold_repeat.csv → model stability summaries
+    
     - plot_subject_level_pred_vs_real.png, plot_subject_level_cBAG_global_hist.png, plot_stability_mae_hist.png → summary plots
+    
     - model_trained_on_all_healthy_corrected.pt → final model trained on all healthy subjects (bias-correction pipeline)
 
 
