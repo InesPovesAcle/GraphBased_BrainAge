@@ -27,7 +27,7 @@ import re  # For extracting numerical IDs using regular expressions
 import torch
 import random
 import numpy as np
-
+from scipy.stats import linregress
 import networkx as nx  # For graph-level metrics
 
 # === Set seed for reproducibility ===
@@ -43,13 +43,16 @@ def seed_everything(seed=42):
 
 seed_everything(42)
 
-
+work_path='/mnt/newStor/paros/paros_WORK/'
+OUT_DIR = os.path.join(os.environ["WORK"], "ines/results/results_with_bias_correction_all_subjects")
+os.makedirs(OUT_DIR, exist_ok=True)
+print("Outputs will be saved to:", OUT_DIR)
 
 # ADDECODE Data
 
 ####################### CONNECTOMES ###############################
 print("ADDECODE CONNECTOMES\n")
-work_path='/mnt/newStor/paros/paros_WORK/'
+
 # === Define paths ===
 #zip_path = "/home/bas/Desktop/MyData/AD_DECODE/AD_DECODE_connectome_act.zip"
 #zip_path = '/$WORK/ines/data/harmonization/ADDecode/connectomes/AD_DECODE_connectome_act.zip'
@@ -510,7 +513,7 @@ numerical_cols = ["Systolic", "Diastolic", "Clustering_Coeff", "Path_Length"]
 pca_cols = ['PC12', 'PC7', 'PC13', 'PC5', 'PC21', 'PC14', 'PC1', 'PC16', 'PC17', 'PC3'] #Top 10 from SPEARMAN  corr (enrich)
 
 
-# === Select healthy subjects only
+# === Select healthy subjects onlyfrom scipy.stats import linregress
 df_controls = addecode_metadata_pca[~addecode_metadata_pca["Risk"].isin(["AD", "MCI"])]
 
 # === Define all columns to z-score
@@ -740,7 +743,7 @@ class BrainAgeGATv2(torch.nn.Module):
     
 finalmodel_path = os.path.join(
     os.environ["WORK"],
-    "ines/code/model_trained_on_all_healthy.pt"
+    "ines/results/results_with_bias_correction/model_trained_on_all_healthy_corrected.pt"
 )
 
 print("Loading model from:", finalmodel_path)
@@ -815,7 +818,17 @@ print(f"RMSE: {rmse:.4f}")
 print(f"MAE:  {mae:.4f}")
 print(f"R²:   {r2:.4f}")
 print("=========================================\n")
+# === Save metrics to file ===
+metrics_path = os.path.join(OUT_DIR, "model_performance_metrics.txt")
 
+with open(metrics_path, "w") as f:
+    f.write("===== MODEL PERFORMANCE (AD-DECODE) =====\n")
+    f.write(f"RMSE: {rmse:.6f}\n")
+    f.write(f"MAE:  {mae:.6f}\n")
+    f.write(f"R2:   {r2:.6f}\n")
+    f.write("\n")
+
+print("Saved metrics to:", metrics_path)
 # Save cvs
 
 # === Align metadata (to include Risk, Sex, Genotype, etc.)
@@ -832,10 +845,9 @@ for col in meta_cols:
 df_preds_aligned["Risk"] = df_preds_aligned["Risk"].fillna("NoRisk").replace(r'^\s*$', "NoRisk", regex=True)
 
 # === Save to CSV for future analysis
-output_path = "brain_age_predictions_with_metadata.csv"
+output_path = os.path.join(OUT_DIR, "brain_age_predictions_all_subjects_bias_corrected.csv")
 df_preds_aligned.to_csv(output_path, index=False)
 print(f"Saved: {output_path}")
-
 
 
 
@@ -853,24 +865,40 @@ plt.figure(figsize=(7, 5))
 sns.scatterplot(data=df_preds, x="Age", y="BAG", alpha=0.6)
 sns.regplot(data=df_preds, x="Age", y="BAG", scatter=False, color="red", label="Trend")
 plt.axhline(0, linestyle="--", color="gray")
-plt.title("BAG vs Age (Before Correction)")
+# === Compute regression stats ===
+slope, intercept, r_value, p_value, std_err = linregress(df_preds["Age"], df_preds["BAG"])
+r2_bag = r_value**2
+plt.title(f"BAG vs Age\nR² = {r2_bag:.3f} | p = {p_value:.3e}")
 plt.xlabel("Chronological Age")
 plt.ylabel("Brain Age Gap (BAG)")
 plt.legend()
 plt.tight_layout()
 plt.show()
-
+plt.savefig(os.path.join(OUT_DIR, "plot_BAG_vs_Age.png"), dpi=300, bbox_inches="tight")
+plt.close()
 # === cBAG vs Age
 plt.figure(figsize=(7, 5))
 sns.scatterplot(data=df_preds, x="Age", y="cBAG", alpha=0.6)
 sns.regplot(data=df_preds, x="Age", y="cBAG", scatter=False, color="green", label="Trend")
 plt.axhline(0, linestyle="--", color="gray")
-plt.title("Corrected BAG vs Age (After Correction)")
+# === Compute regression stats ===
+slope, intercept, r_value, p_value, std_err = linregress(df_preds["Age"], df_preds["cBAG"])
+r2_cbag = r_value**2
+plt.title(f"cBAG vs Age\nR² = {r2_cbag:.3f} | p = {p_value:.3e}")
 plt.xlabel("Chronological Age")
 plt.ylabel("Corrected Brain Age Gap (cBAG)")
 plt.legend()
 plt.tight_layout()
 plt.show()
+plt.savefig(os.path.join(OUT_DIR, "plot_cBAG_vs_Age.png"), dpi=300, bbox_inches="tight")
+plt.close()
+
+
+
+
+
+
+
 
 
 
