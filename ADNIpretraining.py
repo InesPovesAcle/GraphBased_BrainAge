@@ -1663,24 +1663,109 @@ def add_stats_box(ax, x, y, title_prefix=""):
         bbox=dict(facecolor="white", alpha=0.85, edgecolor="k")
     )
 
+
 # ============================
-# 1) OOF Pred vs Real (bias-corrected) + stats
+# 1) OOF Pred vs Real (bias-corrected) + stats + error bars
 # ============================
-x = dfc["Real_Age"].to_numpy(dtype=float)
-y = dfc["Predicted_Age_global_corrected"].to_numpy(dtype=float)
+
+# Agrupar por sujeto para tener un punto por sujeto
+# y usar la desviación estándar entre repeticiones como barra de error
+df_plot = (
+    dfc.groupby("Subject_ID", as_index=False)
+       .agg(
+           Real_Age=("Real_Age", "first"),
+           Pred_Mean=("Predicted_Age_global_corrected", "mean"),
+           Pred_STD=("Predicted_Age_global_corrected", "std")
+       )
+)
+
+# Si algún sujeto solo tiene un valor, std será NaN -> poner 0
+df_plot["Pred_STD"] = df_plot["Pred_STD"].fillna(0.0)
+
+x = df_plot["Real_Age"].to_numpy(dtype=float)
+y = df_plot["Pred_Mean"].to_numpy(dtype=float)
+yerr = df_plot["Pred_STD"].to_numpy(dtype=float)
+
+# Estadísticas
+err = y - x
+mae = float(np.mean(np.abs(err)))
+rmse = float(np.sqrt(np.mean(err**2)))
+ss_res = float(np.sum((y - x)**2))
+ss_tot = float(np.sum((x - np.mean(x))**2))
+r2 = 1 - ss_res/ss_tot if ss_tot > 0 else np.nan
+
+r, p = pearsonr(x, y)
+lr = linregress(x, y)
+
+# Imprimir por consola
+print("\n================ PREDICTED VS REAL (BIAS-CORRECTED) =================")
+print(f"N subjects:      {len(df_plot)}")
+print(f"Pearson r:       {r:+.4f}")
+print(f"p-value:         {p:.4e}")
+print(f"MAE:             {mae:.4f}")
+print(f"RMSE:            {rmse:.4f}")
+print(f"R²:              {r2:.4f}")
+print(f"Fit slope:       {lr.slope:.4f}")
+print(f"Fit intercept:   {lr.intercept:.4f}")
+print("=====================================================================\n")
 
 fig, ax = plt.subplots(figsize=(8,6))
-ax.scatter(x, y, alpha=0.6, edgecolors="k")
+
+# Puntos con barras de error
+ax.errorbar(
+    x, y, yerr=yerr,
+    fmt='o',
+    alpha=0.8,
+    ecolor='gray',
+    elinewidth=1.2,
+    capsize=3,
+    markersize=6,
+    markeredgecolor='k'
+)
+
 mn = float(min(x.min(), y.min()))
 mx = float(max(x.max(), y.max()))
-ax.plot([mn, mx], [mn, mx], linestyle="dashed")
+xx = np.linspace(mn, mx, 200)
+
+# Línea perfecta: y = x
+ax.plot(
+    xx, xx,
+    linestyle="dashed",
+    linewidth=2,
+    color="red",
+    label="Perfect agreement (y=x)"
+)
+
+# Línea del ajuste actual de los datos
+ax.plot(
+    xx, lr.slope * xx + lr.intercept,
+    linestyle="-",
+    linewidth=2,
+    color="blue",
+    label=f"Fit: y={lr.slope:.2f}x+{lr.intercept:.2f}"
+)
+
 ax.set_xlabel("Real Age")
 ax.set_ylabel("Predicted Age (bias-corrected)")
-ax.set_title("Predicted vs Real (OOF bias-corrected, folds×repeats)")
+ax.set_title("Predicted vs Real (subject mean ± std, bias-corrected)")
 ax.grid(True)
-add_stats_box(ax, x, y)
+ax.legend()
 
-out_path = os.path.join(PLOTS_DIR, "pred_vs_real_oof_bias_corrected_with_stats.png")
+# Caja de estadísticas
+txt = (
+    f"Pearson r = {r:+.3f} (p={p:.2e})\n"
+    f"MAE = {mae:.2f}   RMSE = {rmse:.2f}   R² = {r2:.3f}\n"
+    f"Slope = {lr.slope:.3f}   Intercept = {lr.intercept:.3f}"
+)
+
+ax.text(
+    0.02, 0.98, txt,
+    transform=ax.transAxes,
+    va="top", ha="left",
+    bbox=dict(facecolor="white", alpha=0.85, edgecolor="k")
+)
+
+out_path = os.path.join(PLOTS_DIR, "pred_vs_real_oof_bias_corrected_with_errorbars_and_stats.png")
 fig.savefig(out_path, dpi=300, bbox_inches="tight")
 plt.show()
 plt.close(fig)
@@ -1917,10 +2002,7 @@ plt.grid(True)
 save_show_raw(fig, "pred_vs_real_subject_mean.png")
 
 
-mean_ap = 0.5 * (dfp["Real_Age"].values + dfp["Predicted_Age_global_corrected"].values)
-diff = dfp["Predicted_Age_global_corrected"].values - dfp["Real_Age"].values
-md = np.mean(diff)
-sd = np.std(diff)
+
 
 mean_ap = 0.5 * (dfc["Real_Age"].values + dfc["Predicted_Age_global_corrected"].values)
 diff = dfc["Predicted_Age_global_corrected"].values - dfc["Real_Age"].values
