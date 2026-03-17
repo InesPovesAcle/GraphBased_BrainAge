@@ -103,38 +103,30 @@ shap_df["Region_2"] = shap_df["Region_2"].astype(str).str.strip().str.replace('"
 # =========================================================
 # 3) GROUP AND AVERAGE SHAP PER EDGE
 # =========================================================
-# You can choose whether to rank by signed mean SHAP or mean absolute SHAP.
-# For stability/importance, mean absolute SHAP is usually better.
-
-use_abs = True
-
-if use_abs:
-    shap_df["abs_SHAP"] = shap_df["SHAP_val"].abs()
-    grouped = (
-        shap_df.groupby(["Region_1", "Region_2"])["abs_SHAP"]
-        .mean()
-        .reset_index()
-        .rename(columns={"abs_SHAP": "mean_abs_SHAP"})
-    )
-    grouped["PlotWeight"] = grouped["mean_abs_SHAP"]
-    grouped = grouped.sort_values(by="mean_abs_SHAP", ascending=False)
-else:
-    grouped = (
-        shap_df.groupby(["Region_1", "Region_2"])["SHAP_val"]
-        .mean()
-        .reset_index()
-        .rename(columns={"SHAP_val": "mean_SHAP"})
-    )
-    grouped["PlotWeight"] = grouped["mean_SHAP"].abs()
-    grouped = grouped.sort_values(by="PlotWeight", ascending=False)
 
 top_n = 10
+use_abs = True  # keeps your labels later if you want
+
+grouped = (
+    shap_df.groupby(["Region_1", "Region_2"])["SHAP_val"]
+    .agg(
+        mean_SHAP="mean",
+        mean_abs_SHAP=lambda x: np.mean(np.abs(x))
+    )
+    .reset_index()
+)
+
+# choose top edges by absolute importance
+grouped = grouped.sort_values(by="mean_abs_SHAP", ascending=False).reset_index(drop=True)
+
+# BUT paint them by signed SHAP
+grouped["PlotWeight"] = grouped["mean_SHAP"]
+
 top_df = grouped.head(top_n).copy()
 top_df["Connection"] = top_df["Region_1"] + " ↔ " + top_df["Region_2"]
 
 print("\nTop connections:")
-print(top_df[["Connection", "PlotWeight"]])
-
+print(top_df[["Connection", "mean_SHAP", "mean_abs_SHAP"]])
 # =========================================================
 # 4) LOAD REGION CENTROIDS FROM ATLAS
 # =========================================================
@@ -228,52 +220,31 @@ for _, row in top_df.iterrows():
 # =========================================================
 # 6) PLOT GLASS BRAIN
 # =========================================================
+node_colors = "silver"
 
-num_nodes = len(regions_involved)
-cmap = cm.get_cmap("tab20", max(num_nodes, 1))
-node_colors = [cmap(i) for i in range(num_nodes)]
 
-fig = plt.figure(figsize=(16, 7))
-ax_brain = fig.add_axes([0.05, 0.05, 0.68, 0.9])
-ax_legend = fig.add_axes([0.75, 0.1, 0.23, 0.8])
+edge_max = np.max(np.abs(con_matrix))
 
 display = plotting.plot_connectome(
     con_matrix,
     coords,
     edge_threshold="0%",
-    node_color=node_colors,
-    node_size=90,
-    edge_cmap=plt.cm.Reds,
+    node_color="silver",
+    node_size=50,
+    edge_cmap=plt.cm.bwr,
+    edge_vmin=-edge_max,
+    edge_vmax=edge_max,
+    colorbar=True,
     title="Top SHAP connections"
 )
 
-plt.show()
-
-fig.suptitle(
-    f"AD-DECODE Top {top_n} DTI Connections by "
-    + ("Mean |SHAP|" if use_abs else "Mean SHAP"),
-    fontsize=20,
-    y=0.96
-)
-
-ax_legend.axis("off")
-legend_patches = [
-    mpatches.Patch(color=node_colors[i], label=f"{i:02d} → {region}")
-    for i, region in enumerate(regions_involved)
-]
-
-ax_legend.legend(
-    handles=legend_patches,
-    loc="center left",
-    fontsize=11,
-    frameon=False
-)
-
-out_png = os.path.join(OUT_DIR, "glass_brain_dti_top10_addecode.png")
-fig.savefig(out_png, dpi=300, bbox_inches="tight")
+out_png = os.path.join(OUT_DIR, "glass_brain_dti_top10_addecode_signed.png")
+display.savefig(out_png)
 plt.show()
 
 print(f"\nSaved figure: {out_png}")
+
+
 
 # =========================================================
 # 7) TOP CONNECTIONS BY HEMISPHERE (what your PI asked for)
@@ -325,21 +296,21 @@ print(hemisphere_df["Connection_Type"].value_counts())
 # Select top 10 per category
 top_left = (
     hemisphere_df[hemisphere_df["Connection_Type"] == "Left"]
-    .sort_values("PlotWeight", ascending=False)
+    .sort_values("mean_abs_SHAP", ascending=False)
     .head(10)
     .copy()
 )
 
 top_right = (
     hemisphere_df[hemisphere_df["Connection_Type"] == "Right"]
-    .sort_values("PlotWeight", ascending=False)
+    .sort_values("mean_abs_SHAP", ascending=False)
     .head(10)
     .copy()
 )
 
 top_inter = (
     hemisphere_df[hemisphere_df["Connection_Type"] == "Interhemispheric"]
-    .sort_values("PlotWeight", ascending=False)
+    .sort_values("mean_abs_SHAP", ascending=False)
     .head(10)
     .copy()
 )
@@ -400,12 +371,18 @@ for df_set, title in brain_sets:
         con_matrix_subset[i, j] = row["PlotWeight"]
         con_matrix_subset[j, i] = row["PlotWeight"]
 
+    edge_max = np.max(np.abs(con_matrix_subset))
+
     display = plotting.plot_connectome(
         con_matrix_subset,
         coords_subset,
         edge_threshold="0%",
-        node_size=90,
-        edge_cmap=plt.cm.Reds,
+        node_color="silver",
+        node_size=50,
+        edge_cmap=plt.cm.bwr,
+        edge_vmin=-edge_max,
+        edge_vmax=edge_max,
+        colorbar=True,
         title=title
     )
 
@@ -557,4 +534,3 @@ print(f"Saved paper Excel: {paper_xlsx}")
 # Print preview
 print("\nPaper-ready table preview:")
 print(paper_df.head(15))
-
