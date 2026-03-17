@@ -2089,3 +2089,1110 @@ print("Saved integrated SHAP matrix.")
 # The rest of your downstream plotting/statistics blocks can stay the same as in your original script.
 # I stopped here because the key requested fix was the SHAP embedding section and its saved plots.
 # If you want, I can also append the remaining unchanged sections verbatim below this point.
+# ====================== DOMAIN + EDGE SHAP PLOTS ======================
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+import numpy as np
+import pandas as pd
+from scipy.stats import spearmanr
+import matplotlib.pyplot as plt
+
+
+# =========================================================
+# 0) BASIC CHECKS
+# =========================================================
+def check_shapes(df_fused, df_orig, pred_shap, emb_shap, con_shap):
+    assert df_fused.shape[0] == df_orig.shape[0], \
+        "df_fused and df_orig must have same number of subjects"
+    assert pred_shap.shape[0] == df_fused.shape[0], \
+        "pred_shap rows must match df_fused rows"
+    assert pred_shap.shape[1] == df_fused.shape[1], \
+        "pred_shap columns must match fused features"
+    assert emb_shap.shape[0] == df_orig.shape[0], \
+        "emb_shap rows must match df_orig rows"
+    assert con_shap.shape[0] == df_orig.shape[0], \
+        "con_shap rows must match df_orig rows"
+    assert emb_shap.shape[1] == df_orig.shape[1], \
+        "emb_shap columns must match original features"
+    assert con_shap.shape[1] == df_orig.shape[1], \
+        "con_shap columns must match original features"
+
+
+# =========================================================
+# 1) SUMMARY IMPORTANCE PER SHAP SET
+# =========================================================
+def mean_abs_shap(shap_array, feature_names):
+    vals = np.mean(np.abs(shap_array), axis=0)
+    out = pd.DataFrame({
+        "Feature": feature_names,
+        "MeanAbsSHAP": vals
+    }).sort_values("MeanAbsSHAP", ascending=False).reset_index(drop=True)
+    return out
+
+
+# =========================================================
+# 2) CORRELATION-BASED BACKMAPPING
+# =========================================================
+def safe_spearman(x, y):
+    # Returns abs Spearman correlation, NaN-safe
+    ok = np.isfinite(x) & np.isfinite(y)
+    if ok.sum() < 3:
+        return np.nan
+    if np.nanstd(x[ok]) == 0 or np.nanstd(y[ok]) == 0:
+        return np.nan
+    r, _ = spearmanr(x[ok], y[ok])
+    return np.abs(r)
+
+
+def compute_feature_latent_mapping(df_orig, df_fused):
+    """
+    Returns matrix [n_orig x n_fused] of absolute Spearman correlations
+    between original features and fused latent features.
+    """
+    orig_names = df_orig.columns.tolist()
+    fused_names = df_fused.columns.tolist()
+
+    mapping = np.zeros((len(orig_names), len(fused_names)), dtype=float)
+
+    for j, feat in enumerate(orig_names):
+        x = df_orig[feat].values.astype(float)
+        for k, fused in enumerate(fused_names):
+            y = df_fused[fused].values.astype(float)
+            mapping[j, k] = safe_spearman(x, y)
+
+    mapping_df = pd.DataFrame(mapping, index=orig_names, columns=fused_names)
+    return mapping_df
+
+
+# =========================================================
+# 3) BACKMAPPED PREDICTIVE IMPORTANCE
+# =========================================================
+def compute_backmapped_predictive_importance(pred_shap, df_fused, mapping_df,
+                                             top_k_latents=None,
+                                             normalize_latent_importance=True):
+    """
+    pred_shap: [n_subjects x n_fused]
+    mapping_df: [n_orig x n_fused], e.g. abs corr(orig, fused)
+
+    Returns:
+      backmap_df with score per original feature
+      latent_importance_df with predictive importance per fused dim
+    """
+    fused_names = df_fused.columns.tolist()
+
+    latent_importance = np.mean(np.abs(pred_shap), axis=0)
+    latent_importance_df = pd.DataFrame({
+        "FusedFeature": fused_names,
+        "PredictiveMeanAbsSHAP": latent_importance
+    }).sort_values("PredictiveMeanAbsSHAP", ascending=False).reset_index(drop=True)
+
+    if top_k_latents is not None:
+        keep = latent_importance_df["FusedFeature"].iloc[:top_k_latents].tolist()
+        latent_mask = np.array([f in keep for f in fused_names])
+    else:
+        latent_mask = np.ones(len(fused_names), dtype=bool)
+
+    latent_weights = latent_importance.copy()
+    latent_weights[~latent_mask] = 0.0
+
+    if normalize_latent_importance and latent_weights.sum() > 0:
+        latent_weights = latent_weights / latent_weights.sum()
+
+    # mapping_df.values shape = [n_orig x n_fused]
+    backmap_scores = mapping_df.values @ latent_weights
+
+    backmap_df = pd.DataFrame({
+        "Feature": mapping_df.index.tolist(),
+        "PredictiveBackmappedScore": backmap_scores
+    }).sort_values("PredictiveBackmappedScore", ascending=False).reset_index(drop=True)
+
+    return backmap_df, latent_importance_df
+
+
+# =========================================================
+# 4) MERGE ALL THREE VIEWS
+# =========================================================
+def merge_three_views(backmap_df, emb_df, con_df):
+    emb_df2 = emb_df.rename(columns={"MeanAbsSHAP": "EmbeddingMeanAbsSHAP"})
+    con_df2 = con_df.rename(columns={"MeanAbsSHAP": "ContrastiveMeanAbsSHAP"})
+
+    merged = backmap_df.merge(emb_df2, on="Feature", how="outer")
+    merged = merged.merge(con_df2, on="Feature", how="outer")
+
+    # Fill missing with zero if any
+    for c in ["PredictiveBackmappedScore", "EmbeddingMeanAbsSHAP", "ContrastiveMeanAbsSHAP"]:
+        if c in merged.columns:
+            merged[c] = merged[c].fillna(0)
+
+    # rank columns
+    merged["Rank_PredictiveBackmapped"] = merged["PredictiveBackmappedScore"].rank(
+        ascending=False, method="min"
+    )
+    merged["Rank_Embedding"] = merged["EmbeddingMeanAbsSHAP"].rank(
+        ascending=False, method="min"
+    )
+    merged["Rank_Contrastive"] = merged["ContrastiveMeanAbsSHAP"].rank(
+        ascending=False, method="min"
+    )
+
+    # Consensus score: simple z-score average
+    for c in ["PredictiveBackmappedScore", "EmbeddingMeanAbsSHAP", "ContrastiveMeanAbsSHAP"]:
+        mu = merged[c].mean()
+        sd = merged[c].std(ddof=0)
+        if sd == 0:
+            merged[c + "_z"] = 0
+        else:
+            merged[c + "_z"] = (merged[c] - mu) / sd
+
+    merged["ConsensusScore"] = (
+        merged["PredictiveBackmappedScore_z"] +
+        merged["EmbeddingMeanAbsSHAP_z"] +
+        merged["ContrastiveMeanAbsSHAP_z"]
+    ) / 3.0
+
+    merged = merged.sort_values("ConsensusScore", ascending=False).reset_index(drop=True)
+    return merged
+
+
+# =========================================================
+# 5) OVERLAP / RECURRENCE ANALYSIS
+# =========================================================
+def top_feature_overlap(backmap_df, emb_df, con_df, top_n=20):
+    top_pred = set(backmap_df["Feature"].head(top_n))
+    top_emb = set(emb_df["Feature"].head(top_n))
+    top_con = set(con_df["Feature"].head(top_n))
+
+    triple_overlap = sorted(list(top_pred & top_emb & top_con))
+    pred_emb_overlap = sorted(list(top_pred & top_emb))
+    pred_con_overlap = sorted(list(top_pred & top_con))
+    emb_con_overlap = sorted(list(top_emb & top_con))
+
+    overlap_dict = {
+        "top_n": top_n,
+        "n_pred": len(top_pred),
+        "n_emb": len(top_emb),
+        "n_con": len(top_con),
+        "n_pred_emb": len(pred_emb_overlap),
+        "n_pred_con": len(pred_con_overlap),
+        "n_emb_con": len(emb_con_overlap),
+        "n_triple": len(triple_overlap),
+        "pred_emb_overlap_features": pred_emb_overlap,
+        "pred_con_overlap_features": pred_con_overlap,
+        "emb_con_overlap_features": emb_con_overlap,
+        "triple_overlap_features": triple_overlap,
+    }
+    return overlap_dict
+
+
+# =========================================================
+# 6) OPTIONAL FEATURE GROUPING
+# =========================================================
+def assign_feature_group(feature_name):
+    """
+    Edit these rules to match your naming conventions.
+    """
+    f = feature_name.lower()
+
+    if any(x in f for x in ["age", "sex", "apoe", "bmi", "education"]):
+        return "demographics"
+    elif "pc" in f:
+        return "pcs"
+    elif any(x in f for x in ["hc_", "hipp", "amyg", "ctx", "volume", "fa", "md", "rd", "ad"]):
+        return "regions"
+    elif any(x in f for x in ["edge", "conn", "--", "to_", "_to_"]):
+        return "connections"
+    else:
+        return "other"
+
+
+def add_feature_groups(df, feature_col="Feature"):
+    df = df.copy()
+    df["Group"] = df[feature_col].apply(assign_feature_group)
+    return df
+
+
+# =========================================================
+# 7) PLOTS
+# =========================================================
+def plot_top_features(df, score_col, title, outpath, top_n=20):
+    sub = df.head(top_n).iloc[::-1]
+
+    plt.figure(figsize=(8, max(6, top_n * 0.28)))
+    plt.barh(sub["Feature"], sub[score_col])
+    plt.xlabel(score_col)
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(outpath, dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def plot_group_summary(merged_df, outpath):
+    tmp = add_feature_groups(merged_df)
+
+    grp = tmp.groupby("Group")[[
+        "PredictiveBackmappedScore",
+        "EmbeddingMeanAbsSHAP",
+        "ContrastiveMeanAbsSHAP",
+        "ConsensusScore"
+    ]].mean().reset_index()
+
+    grp = grp.sort_values("ConsensusScore", ascending=False)
+
+    x = np.arange(len(grp))
+    width = 0.25
+
+    plt.figure(figsize=(10, 5))
+    plt.bar(x - width, grp["PredictiveBackmappedScore"], width, label="Predictive-backmapped")
+    plt.bar(x,         grp["EmbeddingMeanAbsSHAP"],    width, label="Embedding")
+    plt.bar(x + width, grp["ContrastiveMeanAbsSHAP"],  width, label="Contrastive")
+    plt.xticks(x, grp["Group"], rotation=30, ha="right")
+    plt.ylabel("Mean importance")
+    plt.title("Importance by feature group")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(outpath, dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+# =========================================================
+# 8) MAIN PIPELINE
+# =========================================================
+def run_shap_backmapping_pipeline(
+    df_fused,
+    df_orig,
+    pred_shap,
+    emb_shap,
+    con_shap,
+    outdir,
+    top_k_latents=20,
+    top_n_overlap=20
+):
+    check_shapes(df_fused, df_orig, pred_shap, emb_shap, con_shap)
+
+    fused_names = df_fused.columns.tolist()
+    orig_names = df_orig.columns.tolist()
+
+    # 1) SHAP summaries
+    emb_df = mean_abs_shap(emb_shap, orig_names)
+    con_df = mean_abs_shap(con_shap, orig_names)
+
+    # 2) Mapping original <-> latent
+    mapping_df = compute_feature_latent_mapping(df_orig, df_fused)
+    mapping_df.to_csv(os.path.join(outdir, "orig_to_fused_abs_spearman_mapping.csv"))
+
+    # 3) Backmapped predictive importance
+    backmap_df, latent_importance_df = compute_backmapped_predictive_importance(
+        pred_shap=pred_shap,
+        df_fused=df_fused,
+        mapping_df=mapping_df,
+        top_k_latents=top_k_latents,
+        normalize_latent_importance=True
+    )
+
+    # 4) Merge all three views
+    merged_df = merge_three_views(backmap_df, emb_df, con_df)
+    merged_df = add_feature_groups(merged_df)
+
+    # 5) Overlap
+    overlap = top_feature_overlap(backmap_df, emb_df, con_df, top_n=top_n_overlap)
+    overlap_df = pd.DataFrame({
+        "TripleOverlapFeatures": pd.Series(overlap["triple_overlap_features"])
+    })
+
+    # 6) Save tables
+    latent_importance_df.to_csv(os.path.join(outdir, "predictive_latent_importance.csv"), index=False)
+    backmap_df.to_csv(os.path.join(outdir, "predictive_backmapped_importance.csv"), index=False)
+    emb_df.to_csv(os.path.join(outdir, "embedding_importance.csv"), index=False)
+    con_df.to_csv(os.path.join(outdir, "contrastive_importance.csv"), index=False)
+    merged_df.to_csv(os.path.join(outdir, "merged_three_view_importance.csv"), index=False)
+    overlap_df.to_csv(os.path.join(outdir, f"triple_overlap_top{top_n_overlap}.csv"), index=False)
+
+    # 7) Save text summary
+    with open(os.path.join(outdir, "overlap_summary.txt"), "w") as f:
+        f.write(f"Top N = {overlap['top_n']}\n")
+        f.write(f"Predictive-backmapped ∩ Embedding: {overlap['n_pred_emb']}\n")
+        f.write(f"Predictive-backmapped ∩ Contrastive: {overlap['n_pred_con']}\n")
+        f.write(f"Embedding ∩ Contrastive: {overlap['n_emb_con']}\n")
+        f.write(f"Triple overlap: {overlap['n_triple']}\n\n")
+
+        f.write("Triple-overlap features:\n")
+        for feat in overlap["triple_overlap_features"]:
+            f.write(f"- {feat}\n")
+
+    # 8) Plots
+    plot_top_features(
+        latent_importance_df.rename(columns={"FusedFeature": "Feature",
+                                             "PredictiveMeanAbsSHAP": "Score"}),
+        score_col="Score",
+        title=f"Top predictive latent fused dimensions (top {min(top_k_latents, len(fused_names))})",
+        outpath=os.path.join(outdir, "top_predictive_latent_dims.png"),
+        top_n=min(top_k_latents, len(fused_names))
+    )
+
+    plot_top_features(
+        backmap_df,
+        score_col="PredictiveBackmappedScore",
+        title="Top original metrics from predictive latent SHAP backmapping",
+        outpath=os.path.join(outdir, "top_predictive_backmapped_features.png"),
+        top_n=20
+    )
+
+    plot_top_features(
+        emb_df,
+        score_col="MeanAbsSHAP",
+        title="Top embedding SHAP features",
+        outpath=os.path.join(outdir, "top_embedding_features.png"),
+        top_n=20
+    )
+
+    plot_top_features(
+        con_df,
+        score_col="MeanAbsSHAP",
+        title="Top contrastive SHAP features",
+        outpath=os.path.join(outdir, "top_contrastive_features.png"),
+        top_n=20
+    )
+
+    plot_top_features(
+        merged_df,
+        score_col="ConsensusScore",
+        title="Consensus features across predictive-backmapped, embedding, contrastive",
+        outpath=os.path.join(outdir, "top_consensus_features.png"),
+        top_n=20
+    )
+
+    plot_group_summary(
+        merged_df,
+        outpath=os.path.join(outdir, "group_summary_three_views.png")
+    )
+
+    print("\nSaved outputs to:", outdir)
+    print("\nTop latent predictive dimensions:")
+    print(latent_importance_df.head(10))
+
+    print("\nTop predictive-backmapped original features:")
+    print(backmap_df.head(10))
+
+    print("\nTop embedding SHAP features:")
+    print(emb_df.head(10))
+
+    print("\nTop contrastive SHAP features:")
+    print(con_df.head(10))
+
+    print("\nTop consensus features:")
+    print(merged_df[[
+        "Feature",
+        "Group",
+        "PredictiveBackmappedScore",
+        "EmbeddingMeanAbsSHAP",
+        "ContrastiveMeanAbsSHAP",
+        "ConsensusScore"
+    ]].head(20))
+
+    print("\nTriple overlap features:")
+    print(overlap["triple_overlap_features"])
+
+    return {
+        "mapping_df": mapping_df,
+        "latent_importance_df": latent_importance_df,
+        "backmap_df": backmap_df,
+        "emb_df": emb_df,
+        "con_df": con_df,
+        "merged_df": merged_df,
+        "overlap": overlap
+    }
+
+# ====================== APPEND BELOW: SHAP BARPLOTS + BEESWARMS + EDGE/REGION PLOTS ======================
+
+# ====================== APPEND BELOW: SHAP BARPLOTS + BEESWARMS + EDGE/REGION PLOTS ======================
+
+import warnings
+
+# ------------------------------------------------------------------
+# 1) ATLAS NAME MAP
+# ------------------------------------------------------------------
+extra_plot_dir = os.path.join(output_dir, "extra_shap_plots")
+os.makedirs(extra_plot_dir, exist_ok=True)
+
+atlas_name_map_path = os.path.join(WORK, "ines/data/atlas/IITmean_RPI_index.xlsx")
+
+def clean_region_name(name):
+    name = str(name).strip().replace('"', "")
+    if name.startswith("ctx-lh-"):
+        name = name.replace("ctx-lh-", "Left ")
+    elif name.startswith("ctx-rh-"):
+        name = name.replace("ctx-rh-", "Right ")
+    name = name.replace("Left-", "Left ")
+    name = name.replace("Right-", "Right ")
+    name = name.replace("-Proper", "")
+    name = name.replace("-area", "")
+    name = name.replace("-", " ")
+    name = " ".join(name.split())
+    return name.strip()
+
+# leer atlas
+df_atlas = pd.read_excel(atlas_name_map_path)
+df_atlas.columns = [str(c).strip() for c in df_atlas.columns]
+
+print("\n=== ATLAS DEBUG ===")
+print("Atlas path:", atlas_name_map_path)
+print("Atlas columns:", df_atlas.columns.tolist())
+
+# usar SOLO estas columnas
+df_atlas = df_atlas[["index2", "Structure"]].copy()
+df_atlas["index2"] = pd.to_numeric(df_atlas["index2"], errors="coerce")
+df_atlas = df_atlas.dropna(subset=["index2", "Structure"])
+df_atlas["index2"] = df_atlas["index2"].astype(int)
+
+# construir mapa 1..84 -> nombre
+ROI_NAME_MAP = {i: f"Region {i}" for i in range(1, 85)}
+
+for _, row in df_atlas.iterrows():
+    roi_idx = int(row["index2"])
+    if 1 <= roi_idx <= 84:
+        ROI_NAME_MAP[roi_idx] = clean_region_name(row["Structure"])
+
+print("\n=== FINAL ROI_NAME_MAP CHECK ===")
+for i in range(1, 15):
+    print(f"{i} -> {ROI_NAME_MAP[i]}")
+
+pd.DataFrame({
+    "ROI_idx": list(range(1, 85)),
+    "Region_name": [ROI_NAME_MAP[i] for i in range(1, 85)]
+}).to_csv(
+    os.path.join(extra_plot_dir, "ROI_index_to_region_name.csv"),
+    index=False
+)
+
+# ------------------------------------------------------------------
+# 2) GENERAL HELPERS
+# ------------------------------------------------------------------
+def savefig_show(outpath, dpi=300):
+    plt.tight_layout()
+    plt.savefig(outpath, dpi=dpi, bbox_inches="tight")
+    plt.show()
+    plt.close()
+
+def classify_feature(feature_name):
+    f = str(feature_name).lower()
+    if f in ["systolic", "diastolic", "sex_encoded", "genotype_encoded"]:
+        return "demographics"
+    elif f in ["clustering_coeff", "path_length"]:
+        return "graph_metrics"
+    elif f.startswith("pc"):
+        return "pcs"
+    elif any(x in f for x in ["roi_", "region ", "hipp", "amyg", "ctx", "volume", "fa", "md"]):
+        return "regions"
+    elif any(x in f for x in ["edge", "conn", "--", "_to_", " to "]):
+        return "connections"
+    else:
+        return "other"
+
+def pretty_input_feature_name(f):
+    rename_map = {
+        "Systolic": "Systolic BP",
+        "Diastolic": "Diastolic BP",
+        "sex_encoded": "Sex",
+        "genotype_encoded": "APOE genotype",
+        "Clustering_Coeff": "Clustering coefficient",
+        "Path_Length": "Path length",
+    }
+
+    f_str = str(f)
+
+    if f_str.startswith("ROI_"):
+        try:
+            roi_num = int(f_str.replace("ROI_", ""))
+            return clean_region_name(ROI_NAME_MAP.get(roi_num, f"Region {roi_num}"))
+        except Exception:
+            return f_str
+
+    return rename_map.get(f_str, f_str)
+
+def signed_spearman(x, y):
+    ok = np.isfinite(x) & np.isfinite(y)
+    if ok.sum() < 3:
+        return np.nan
+    if np.nanstd(x[ok]) == 0 or np.nanstd(y[ok]) == 0:
+        return np.nan
+    r, _ = spearmanr(x[ok], y[ok])
+    return r
+
+def build_signed_mapping(df_orig_num, df_fused_num):
+    orig_names = df_orig_num.columns.tolist()
+    fused_names = df_fused_num.columns.tolist()
+
+    arr = np.zeros((len(orig_names), len(fused_names)), dtype=float)
+
+    for j, feat in enumerate(orig_names):
+        x = df_orig_num[feat].values.astype(float)
+        for k, fused in enumerate(fused_names):
+            y = df_fused_num[fused].values.astype(float)
+            r = signed_spearman(x, y)
+            arr[j, k] = 0.0 if pd.isna(r) else r
+
+    return pd.DataFrame(arr, index=orig_names, columns=fused_names)
+
+def make_barplot(df, score_col, title, outpath, top_n=20):
+    sub = df.head(top_n).copy().iloc[::-1]
+    sub["PrettyFeature"] = sub["Feature"].map(pretty_input_feature_name)
+
+    plt.figure(figsize=(9, max(5, 0.38 * len(sub))))
+    plt.barh(sub["PrettyFeature"], sub[score_col])
+    plt.xlabel(score_col)
+    plt.ylabel("")
+    plt.title(title)
+    savefig_show(outpath)
+
+def make_grouped_barplot(merged_df, outpath, title="Mean importance by feature group"):
+    tmp = merged_df.copy()
+    tmp["Group"] = tmp["Feature"].apply(classify_feature)
+
+    grp = tmp.groupby("Group")[[
+        "PredictiveBackmappedScore",
+        "EmbeddingMeanSHAP_signedAbsMean",
+        "ContrastiveMeanSHAP_signedAbsMean"
+    ]].mean().reset_index()
+
+    desired_order = ["demographics", "graph_metrics", "pcs", "regions", "connections", "other"]
+    grp["order"] = grp["Group"].apply(lambda x: desired_order.index(x) if x in desired_order else 999)
+    grp = grp.sort_values("order")
+
+    x = np.arange(len(grp))
+    width = 0.25
+
+    plt.figure(figsize=(10, 5))
+    plt.bar(x - width, grp["PredictiveBackmappedScore"], width, label="Predictive-backmapped")
+    plt.bar(x,         grp["EmbeddingMeanSHAP_signedAbsMean"], width, label="Embedding")
+    plt.bar(x + width, grp["ContrastiveMeanSHAP_signedAbsMean"], width, label="Contrastive")
+
+    plt.xticks(x, grp["Group"], rotation=25, ha="right")
+    plt.ylabel("Mean importance")
+    plt.title(title)
+    plt.legend()
+    savefig_show(outpath)
+
+def make_beeswarm(shap_matrix, X_df, title, outpath, max_display=20):
+    plt.figure()
+    shap.summary_plot(
+        shap_matrix,
+        X_df,
+        show=False,
+        max_display=max_display
+    )
+    plt.title(title)
+    savefig_show(outpath)
+
+def make_barplot_by_group(df, score_col, group_name, outpath, title=None, top_n=20):
+    tmp = df.copy()
+    tmp["Group"] = tmp["Feature"].apply(classify_feature)
+    tmp = tmp[tmp["Group"] == group_name].copy()
+
+    if tmp.empty:
+        print(f"[SKIP] No features found for group '{group_name}' in {score_col}")
+        return
+
+    tmp = tmp.sort_values(score_col, ascending=False).head(top_n)
+    make_barplot(
+        tmp.rename(columns={score_col: "PlotScore"}),
+        score_col="PlotScore",
+        title=title if title is not None else f"{group_name} - {score_col}",
+        outpath=outpath,
+        top_n=len(tmp)
+    )
+
+def subset_X_by_group(X_df, group_name):
+    cols = [c for c in X_df.columns if classify_feature(c) == group_name]
+    return X_df[cols].copy(), cols
+
+def subset_shap_by_group(shap_mat, X_df, group_name):
+    cols = [c for c in X_df.columns if classify_feature(c) == group_name]
+    idx = [X_df.columns.get_loc(c) for c in cols]
+    if len(idx) == 0:
+        return None, None
+    return shap_mat[:, idx], X_df[cols].copy()
+
+
+# ------------------------------------------------------------------
+# 3) BUILD PREDICTIVE BACKMAPPED SUBJECT-LEVEL MATRIX
+# ------------------------------------------------------------------
+predictive_merge_df = final_embeddings_df.merge(
+    original_feature_df,
+    on="Subject_ID",
+    how="left"
+)
+
+predictive_input_cols_original = embedding_input_cols.copy()
+predictive_fused_cols = predictive_feature_cols.copy()
+
+valid_mask_pred_backmap = ~(
+    predictive_merge_df[predictive_input_cols_original].isna().any(axis=1) |
+    predictive_merge_df[predictive_fused_cols].isna().any(axis=1)
+)
+
+pred_backmap_df_valid = predictive_merge_df.loc[valid_mask_pred_backmap].reset_index(drop=True)
+
+X_fused_valid = pred_backmap_df_valid[predictive_fused_cols].copy()
+X_orig_valid = pred_backmap_df_valid[predictive_input_cols_original].copy()
+
+shap_values_pred_valid = np.array(shap_values_pred)[valid_mask_pred_backmap.values, :]
+
+signed_mapping_df = build_signed_mapping(X_orig_valid, X_fused_valid)
+
+pred_backmapped_subject_mat = shap_values_pred_valid @ signed_mapping_df.values.T
+
+pred_backmapped_subject_df = pd.DataFrame(
+    pred_backmapped_subject_mat,
+    columns=predictive_input_cols_original
+)
+
+pred_backmapped_importance_df = pd.DataFrame({
+    "Feature": predictive_input_cols_original,
+    "PredictiveBackmappedScore": np.mean(np.abs(pred_backmapped_subject_mat), axis=0)
+}).sort_values("PredictiveBackmappedScore", ascending=False).reset_index(drop=True)
+
+pred_backmapped_importance_df.to_csv(
+    os.path.join(extra_plot_dir, "predictive_backmapped_subjectlevel_importance.csv"),
+    index=False
+)
+
+pred_backmapped_subject_df.to_csv(
+    os.path.join(extra_plot_dir, "predictive_backmapped_subjectlevel_matrix.csv"),
+    index=False
+)
+
+
+# ------------------------------------------------------------------
+# 4) RECOMPUTE EMBEDDING SHAP AS SUBJECT-LEVEL MATRIX
+# ------------------------------------------------------------------
+print("\n=== Recomputing embedding SHAP subject-level matrix for beeswarm plots ===")
+
+embedding_signed_mats = []
+
+for target_col in Y_emb.columns:
+    y_emb_dim = Y_emb[target_col].values
+
+    if np.nanstd(y_emb_dim) < 1e-8:
+        continue
+
+    rf_emb_dim = RandomForestRegressor(
+        n_estimators=300,
+        random_state=42,
+        n_jobs=-1
+    )
+    rf_emb_dim.fit(X_emb, y_emb_dim)
+
+    explainer_emb_dim = shap.TreeExplainer(rf_emb_dim)
+    shap_values_emb_dim = explainer_emb_dim.shap_values(X_emb)
+
+    embedding_signed_mats.append(shap_values_emb_dim)
+
+if len(embedding_signed_mats) == 0:
+    raise ValueError("No usable embedding dimensions to build subject-level embedding SHAP matrix.")
+
+embedding_shap_subject_mat = np.mean(np.stack(embedding_signed_mats, axis=0), axis=0)
+
+embedding_shap_subject_df = pd.DataFrame(
+    embedding_shap_subject_mat,
+    columns=X_emb.columns
+)
+
+embedding_shap_subject_df.to_csv(
+    os.path.join(extra_plot_dir, "embedding_subjectlevel_shap_matrix.csv"),
+    index=False
+)
+
+embedding_shap_importance_subject_df = pd.DataFrame({
+    "Feature": X_emb.columns,
+    "EmbeddingMeanSHAP_signedAbsMean": np.mean(np.abs(embedding_shap_subject_mat), axis=0)
+}).sort_values("EmbeddingMeanSHAP_signedAbsMean", ascending=False).reset_index(drop=True)
+
+embedding_shap_importance_subject_df.to_csv(
+    os.path.join(extra_plot_dir, "embedding_subjectlevel_importance.csv"),
+    index=False
+)
+
+
+# ------------------------------------------------------------------
+# 5) CONTRASTIVE SUBJECT-LEVEL MATRIX
+# ------------------------------------------------------------------
+contrastive_shap_subject_mat = np.array(shap_values_con)
+
+contrastive_shap_subject_df = pd.DataFrame(
+    contrastive_shap_subject_mat,
+    columns=X_con.columns
+)
+
+contrastive_shap_subject_df.to_csv(
+    os.path.join(extra_plot_dir, "contrastive_subjectlevel_shap_matrix.csv"),
+    index=False
+)
+
+contrastive_shap_importance_subject_df = pd.DataFrame({
+    "Feature": X_con.columns,
+    "ContrastiveMeanSHAP_signedAbsMean": np.mean(np.abs(contrastive_shap_subject_mat), axis=0)
+}).sort_values("ContrastiveMeanSHAP_signedAbsMean", ascending=False).reset_index(drop=True)
+
+contrastive_shap_importance_subject_df.to_csv(
+    os.path.join(extra_plot_dir, "contrastive_subjectlevel_importance.csv"),
+    index=False
+)
+
+
+# ------------------------------------------------------------------
+# 6) MERGE THE 3 COMPARABLE VIEWS
+# ------------------------------------------------------------------
+three_view_df = pred_backmapped_importance_df.merge(
+    embedding_shap_importance_subject_df,
+    on="Feature",
+    how="outer"
+).merge(
+    contrastive_shap_importance_subject_df,
+    on="Feature",
+    how="outer"
+)
+
+for c in ["PredictiveBackmappedScore", "EmbeddingMeanSHAP_signedAbsMean", "ContrastiveMeanSHAP_signedAbsMean"]:
+    three_view_df[c] = three_view_df[c].fillna(0.0)
+
+three_view_df["Group"] = three_view_df["Feature"].apply(classify_feature)
+
+for c in ["PredictiveBackmappedScore", "EmbeddingMeanSHAP_signedAbsMean", "ContrastiveMeanSHAP_signedAbsMean"]:
+    mu = three_view_df[c].mean()
+    sd = three_view_df[c].std(ddof=0)
+    if sd == 0:
+        three_view_df[c + "_z"] = 0.0
+    else:
+        three_view_df[c + "_z"] = (three_view_df[c] - mu) / sd
+
+three_view_df["ConsensusScore"] = (
+    three_view_df["PredictiveBackmappedScore_z"] +
+    three_view_df["EmbeddingMeanSHAP_signedAbsMean_z"] +
+    three_view_df["ContrastiveMeanSHAP_signedAbsMean_z"]
+) / 3.0
+
+three_view_df = three_view_df.sort_values("ConsensusScore", ascending=False).reset_index(drop=True)
+
+three_view_df.to_csv(
+    os.path.join(extra_plot_dir, "three_view_comparable_importance.csv"),
+    index=False
+)
+
+
+# ------------------------------------------------------------------
+# 7) GLOBAL BAR PLOTS (ALL COMPARABLE FEATURES)
+# ------------------------------------------------------------------
+make_barplot(
+    pred_backmapped_importance_df,
+    score_col="PredictiveBackmappedScore",
+    title="Predictive backmapped SHAP (global bar plot)",
+    outpath=os.path.join(extra_plot_dir, "bar_predictive_backmapped_all.png"),
+    top_n=len(pred_backmapped_importance_df)
+)
+
+make_barplot(
+    embedding_shap_importance_subject_df.rename(
+        columns={"EmbeddingMeanSHAP_signedAbsMean": "ScoreTmp"}
+    ),
+    score_col="ScoreTmp",
+    title="Embedding SHAP (global bar plot)",
+    outpath=os.path.join(extra_plot_dir, "bar_embedding_all.png"),
+    top_n=len(embedding_shap_importance_subject_df)
+)
+
+make_barplot(
+    contrastive_shap_importance_subject_df.rename(
+        columns={"ContrastiveMeanSHAP_signedAbsMean": "ScoreTmp"}
+    ),
+    score_col="ScoreTmp",
+    title="Contrastive SHAP (global bar plot)",
+    outpath=os.path.join(extra_plot_dir, "bar_contrastive_all.png"),
+    top_n=len(contrastive_shap_importance_subject_df)
+)
+
+make_barplot(
+    three_view_df.rename(columns={"ConsensusScore": "ScoreTmp"}),
+    score_col="ScoreTmp",
+    title="Consensus across predictive-backmapped, embedding and contrastive",
+    outpath=os.path.join(extra_plot_dir, "bar_consensus_all.png"),
+    top_n=len(three_view_df)
+)
+
+make_grouped_barplot(
+    three_view_df,
+    outpath=os.path.join(extra_plot_dir, "bar_group_summary_three_views.png"),
+    title="Mean importance by feature group across the three SHAP views"
+)
+
+
+# ------------------------------------------------------------------
+# 8) BAR PLOTS BY GROUP
+# ------------------------------------------------------------------
+for grp in ["demographics", "graph_metrics", "pcs"]:
+    make_barplot_by_group(
+        pred_backmapped_importance_df,
+        score_col="PredictiveBackmappedScore",
+        group_name=grp,
+        outpath=os.path.join(extra_plot_dir, f"bar_predictive_backmapped_{grp}.png"),
+        title=f"Predictive backmapped SHAP - {grp}"
+    )
+
+    make_barplot_by_group(
+        embedding_shap_importance_subject_df,
+        score_col="EmbeddingMeanSHAP_signedAbsMean",
+        group_name=grp,
+        outpath=os.path.join(extra_plot_dir, f"bar_embedding_{grp}.png"),
+        title=f"Embedding SHAP - {grp}"
+    )
+
+    make_barplot_by_group(
+        contrastive_shap_importance_subject_df,
+        score_col="ContrastiveMeanSHAP_signedAbsMean",
+        group_name=grp,
+        outpath=os.path.join(extra_plot_dir, f"bar_contrastive_{grp}.png"),
+        title=f"Contrastive SHAP - {grp}"
+    )
+
+
+# ------------------------------------------------------------------
+# 9) BEESWARM PLOTS (ALL COMPARABLE FEATURES)
+# ------------------------------------------------------------------
+make_beeswarm(
+    pred_backmapped_subject_mat,
+    X_orig_valid.rename(columns=pretty_input_feature_name),
+    title="Predictive backmapped SHAP beeswarm",
+    outpath=os.path.join(extra_plot_dir, "beeswarm_predictive_backmapped_all.png"),
+    max_display=len(X_orig_valid.columns)
+)
+
+make_beeswarm(
+    embedding_shap_subject_mat,
+    X_emb.rename(columns=pretty_input_feature_name),
+    title="Embedding SHAP beeswarm",
+    outpath=os.path.join(extra_plot_dir, "beeswarm_embedding_all.png"),
+    max_display=len(X_emb.columns)
+)
+
+make_beeswarm(
+    contrastive_shap_subject_mat,
+    X_con.rename(columns=pretty_input_feature_name),
+    title="Contrastive SHAP beeswarm",
+    outpath=os.path.join(extra_plot_dir, "beeswarm_contrastive_all.png"),
+    max_display=len(X_con.columns)
+)
+
+
+# ------------------------------------------------------------------
+# 10) BEESWARM PLOTS BY GROUP
+# ------------------------------------------------------------------
+for grp in ["demographics", "graph_metrics", "pcs"]:
+    shap_sub, X_sub = subset_shap_by_group(pred_backmapped_subject_mat, X_orig_valid, grp)
+    if shap_sub is not None and X_sub.shape[1] > 0:
+        make_beeswarm(
+            shap_sub,
+            X_sub.rename(columns=pretty_input_feature_name),
+            title=f"Predictive backmapped SHAP beeswarm - {grp}",
+            outpath=os.path.join(extra_plot_dir, f"beeswarm_predictive_backmapped_{grp}.png"),
+            max_display=X_sub.shape[1]
+        )
+
+    shap_sub, X_sub = subset_shap_by_group(embedding_shap_subject_mat, X_emb, grp)
+    if shap_sub is not None and X_sub.shape[1] > 0:
+        make_beeswarm(
+            shap_sub,
+            X_sub.rename(columns=pretty_input_feature_name),
+            title=f"Embedding SHAP beeswarm - {grp}",
+            outpath=os.path.join(extra_plot_dir, f"beeswarm_embedding_{grp}.png"),
+            max_display=X_sub.shape[1]
+        )
+
+    shap_sub, X_sub = subset_shap_by_group(contrastive_shap_subject_mat, X_con, grp)
+    if shap_sub is not None and X_sub.shape[1] > 0:
+        make_beeswarm(
+            shap_sub,
+            X_sub.rename(columns=pretty_input_feature_name),
+            title=f"Contrastive SHAP beeswarm - {grp}",
+            outpath=os.path.join(extra_plot_dir, f"beeswarm_contrastive_{grp}.png"),
+            max_display=X_sub.shape[1]
+        )
+
+
+# ------------------------------------------------------------------
+# 11) TOP CONNECTIONS FROM EDGE-LEVEL SHAP
+# ------------------------------------------------------------------
+def guess_edge_pairs_from_cols(edge_cols, n_nodes=84):
+    """
+    Tries to infer node pairs from your SHAP column names.
+    Supports:
+      - upper-triangular order fallback
+      - names containing two integers, e.g. edge_3_18 or 3_18
+    Returns a list of tuples (i, j) in 1-based indexing.
+    """
+    pairs = []
+
+    parsed_ok = True
+    for c in edge_cols:
+        nums = re.findall(r"\d+", str(c))
+        if len(nums) >= 2:
+            i = int(nums[0])
+            j = int(nums[1])
+
+            if i == 0 or j == 0:
+                i += 1
+                j += 1
+
+            if i == j:
+                parsed_ok = False
+                break
+            pairs.append((i, j))
+        else:
+            parsed_ok = False
+            break
+
+    if parsed_ok and len(pairs) == len(edge_cols):
+        return pairs
+
+    ui, uj = np.triu_indices(n_nodes, k=1)
+    pairs = list(zip(ui + 1, uj + 1))
+    if len(pairs) != len(edge_cols):
+        raise ValueError(
+            f"Could not infer edge pairs. Number of edge columns = {len(edge_cols)} "
+            f"but upper-triangular for n_nodes={n_nodes} gives {len(pairs)}."
+        )
+    return pairs
+
+edge_pairs_1based = guess_edge_pairs_from_cols(shap_feature_cols, n_nodes=84)
+
+edge_importance_df = pd.DataFrame({
+    "EdgeCol": shap_feature_cols,
+    "Node_i": [p[0] for p in edge_pairs_1based],
+    "Node_j": [p[1] for p in edge_pairs_1based],
+    "Region_i": [clean_region_name(ROI_NAME_MAP[p[0]]) for p in edge_pairs_1based],
+    "Region_j": [clean_region_name(ROI_NAME_MAP[p[1]]) for p in edge_pairs_1based],
+    "Connection": [
+        f"{clean_region_name(ROI_NAME_MAP[p[0]])} ↔ {clean_region_name(ROI_NAME_MAP[p[1]])}"
+        for p in edge_pairs_1based
+    ],
+    "MeanAbsSHAP": np.mean(np.abs(df_shap[shap_feature_cols].values), axis=0)
+}).sort_values("MeanAbsSHAP", ascending=False).reset_index(drop=True)
+
+edge_importance_df.to_csv(
+    os.path.join(extra_plot_dir, "edge_level_top_connections.csv"),
+    index=False
+)
+
+plt.figure(figsize=(10, max(6, 0.35 * 20)))
+sub = edge_importance_df.head(20).iloc[::-1]
+plt.barh(sub["Connection"], sub["MeanAbsSHAP"])
+plt.xlabel("Mean |edge SHAP|")
+plt.ylabel("")
+plt.title("Top 20 connections from edge-level SHAP")
+savefig_show(os.path.join(extra_plot_dir, "bar_top20_connections_edge_shap.png"))
+
+
+# ------------------------------------------------------------------
+# 12) TOP REGIONS FROM EDGE-LEVEL SHAP
+# ------------------------------------------------------------------
+region_scores = {roi_idx: 0.0 for roi_idx in range(1, 85)}
+
+for _, row in edge_importance_df.iterrows():
+    region_scores[int(row["Node_i"])] += float(row["MeanAbsSHAP"])
+    region_scores[int(row["Node_j"])] += float(row["MeanAbsSHAP"])
+
+region_importance_df = pd.DataFrame({
+    "ROI_idx": list(region_scores.keys()),
+    "Feature": [clean_region_name(ROI_NAME_MAP[k]) for k in region_scores.keys()],
+    "MeanAbsSHAP": list(region_scores.values())
+}).sort_values("MeanAbsSHAP", ascending=False).reset_index(drop=True)
+
+region_importance_df.to_csv(
+    os.path.join(extra_plot_dir, "edge_derived_top_regions.csv"),
+    index=False
+)
+
+plt.figure(figsize=(10, max(6, 0.35 * 20)))
+sub = region_importance_df.head(20).iloc[::-1]
+plt.barh(sub["Feature"], sub["MeanAbsSHAP"])
+plt.xlabel("Summed incident edge |SHAP|")
+plt.ylabel("")
+plt.title("Top 20 regions from edge-level SHAP")
+savefig_show(os.path.join(extra_plot_dir, "bar_top20_regions_edge_shap.png"))
+
+
+# ------------------------------------------------------------------
+# 13) OPTIONAL SUBJECT-LEVEL HEATMAPS FOR TOP REGIONS / CONNECTIONS
+# ------------------------------------------------------------------
+top_conn_cols = edge_importance_df["EdgeCol"].head(20).tolist()
+top_conn_names = edge_importance_df["Connection"].head(20).tolist()
+
+top_conn_mat = df_shap[top_conn_cols].copy()
+top_conn_mat.columns = top_conn_names
+
+plt.figure(figsize=(12, 8))
+sns.heatmap(top_conn_mat.iloc[:min(50, len(top_conn_mat))].T, cmap="coolwarm", center=0)
+plt.title("Top 20 connection SHAP values across first subjects")
+plt.xlabel("Subjects")
+plt.ylabel("Connections")
+savefig_show(os.path.join(extra_plot_dir, "heatmap_top20_connections_subjects.png"))
+
+edge_shap_subject_mat = df_shap[shap_feature_cols].values
+region_subject_scores = np.zeros((edge_shap_subject_mat.shape[0], 84), dtype=float)
+
+for e_idx, (i, j) in enumerate(edge_pairs_1based):
+    region_subject_scores[:, i - 1] += np.abs(edge_shap_subject_mat[:, e_idx])
+    region_subject_scores[:, j - 1] += np.abs(edge_shap_subject_mat[:, e_idx])
+
+region_subject_df = pd.DataFrame(
+    region_subject_scores,
+    columns=[clean_region_name(ROI_NAME_MAP[i]) for i in range(1, 85)]
+)
+
+top_region_names = region_importance_df["Feature"].head(20).tolist()
+
+plt.figure(figsize=(12, 8))
+sns.heatmap(region_subject_df[top_region_names].iloc[:min(50, len(region_subject_df))].T, cmap="viridis")
+plt.title("Top 20 region scores across first subjects")
+plt.xlabel("Subjects")
+plt.ylabel("Regions")
+savefig_show(os.path.join(extra_plot_dir, "heatmap_top20_regions_subjects.png"))
+
+
+# ------------------------------------------------------------------
+# 14) SIMPLE OVERLAP TABLES FOR THE 3 COMPARABLE SHAP VIEWS
+# ------------------------------------------------------------------
+top_n_overlap = 10
+
+top_pred_set = set(pred_backmapped_importance_df["Feature"].head(top_n_overlap))
+top_emb_set = set(embedding_shap_importance_subject_df["Feature"].head(top_n_overlap))
+top_con_set = set(contrastive_shap_importance_subject_df["Feature"].head(top_n_overlap))
+
+triple_overlap = sorted(list(top_pred_set & top_emb_set & top_con_set))
+
+overlap_rows = []
+for feat in sorted(list(top_pred_set | top_emb_set | top_con_set)):
+    overlap_rows.append({
+        "Feature": feat,
+        "PrettyFeature": pretty_input_feature_name(feat),
+        "InTopPredictiveBackmapped": feat in top_pred_set,
+        "InTopEmbedding": feat in top_emb_set,
+        "InTopContrastive": feat in top_con_set,
+    })
+
+overlap_df = pd.DataFrame(overlap_rows)
+overlap_df.to_csv(
+    os.path.join(extra_plot_dir, f"top{top_n_overlap}_overlap_three_views.csv"),
+    index=False
+)
+
+with open(os.path.join(extra_plot_dir, f"top{top_n_overlap}_triple_overlap.txt"), "w") as f:
+    f.write(f"Top {top_n_overlap} triple-overlap features\n")
+    f.write("=" * 50 + "\n")
+    for feat in triple_overlap:
+        f.write(pretty_input_feature_name(feat) + "\n")
+
+print("\n=== DONE: extra SHAP plots saved in ===")
+print(extra_plot_dir)
+print("Triple overlap features:", [pretty_input_feature_name(x) for x in triple_overlap])
