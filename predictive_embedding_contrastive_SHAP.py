@@ -3196,3 +3196,249 @@ with open(os.path.join(extra_plot_dir, f"top{top_n_overlap}_triple_overlap.txt")
 print("\n=== DONE: extra SHAP plots saved in ===")
 print(extra_plot_dir)
 print("Triple overlap features:", [pretty_input_feature_name(x) for x in triple_overlap])
+
+
+# ====================== ORDER HEATMAPS BY EXISTING CLUSTERS ======================
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# ------------------------------------------------------------------
+# 1) LOAD FILE WITH CLUSTERS
+# ------------------------------------------------------------------
+cluster_file = os.path.join(
+    WORK,
+    "ines/results/AD_DECODE_data6_merged_with_cBAG_PCA_HCmetrics_plusCluster.xlsx"
+)
+
+df_clusters = pd.read_excel(cluster_file)
+
+print("\n=== CLUSTER FILE DEBUG ===")
+print("Cluster file:", cluster_file)
+print("Columns found:")
+print(df_clusters.columns.tolist())
+
+# ------------------------------------------------------------------
+# 2) DEFINE COLUMN NAMES
+# ------------------------------------------------------------------
+# Change these ONLY if your file uses different names
+cluster_id_col = "MRI_Exam"
+cluster_col = "Cluster_HC"
+
+if cluster_id_col not in df_clusters.columns:
+    raise ValueError(f"Column '{cluster_id_col}' not found in cluster file.")
+
+if cluster_col not in df_clusters.columns:
+    raise ValueError(f"Column '{cluster_col}' not found in cluster file.")
+
+# ------------------------------------------------------------------
+# 3) FIX IDS AND MERGE WITH SHAP TABLE
+# ------------------------------------------------------------------
+df_clusters["Subject_ID_fixed"] = (
+    df_clusters[cluster_id_col]
+    .fillna(0)
+    .astype(int)
+    .astype(str)
+    .str.zfill(5)
+)
+
+df_shap["Subject_ID_fixed"] = df_shap["Subject_ID"].astype(str).str.zfill(5)
+
+df_shap_clustered = df_shap.merge(
+    df_clusters[["Subject_ID_fixed", cluster_col]],
+    on="Subject_ID_fixed",
+    how="left"
+)
+
+print("\n=== MERGE CHECK ===")
+print(df_shap_clustered[["Subject_ID", "Subject_ID_fixed", cluster_col]].head())
+print("\nCluster counts after merge:")
+print(df_shap_clustered[cluster_col].value_counts(dropna=False).sort_index())
+
+# ------------------------------------------------------------------
+# 4) OUTPUT DIR
+# ------------------------------------------------------------------
+cluster_plot_dir = os.path.join(extra_plot_dir, "ordered_by_existing_clusters")
+os.makedirs(cluster_plot_dir, exist_ok=True)
+
+# ------------------------------------------------------------------
+# 5) PREPARE TOP CONNECTIONS TABLE ORDERED BY CLUSTER
+# ------------------------------------------------------------------
+top_conn_cols = edge_importance_df["EdgeCol"].head(20).tolist()
+top_conn_names = edge_importance_df["Connection"].head(20).tolist()
+
+conn_plot_df = df_shap_clustered[["Subject_ID_fixed", cluster_col] + top_conn_cols].copy()
+conn_plot_df = conn_plot_df.dropna(subset=[cluster_col]).copy()
+conn_plot_df[cluster_col] = conn_plot_df[cluster_col].astype(int)
+
+conn_plot_df = conn_plot_df.sort_values([cluster_col, "Subject_ID_fixed"]).reset_index(drop=True)
+
+conn_heatmap_mat = conn_plot_df[top_conn_cols].T
+conn_heatmap_mat.index = top_conn_names
+
+# boundaries between clusters
+cluster_sizes_conn = conn_plot_df[cluster_col].value_counts().sort_index()
+boundaries_conn = np.cumsum(cluster_sizes_conn.values)[:-1]
+
+# ------------------------------------------------------------------
+# 6) PLOT TOP CONNECTIONS HEATMAP ORDERED BY CLUSTER
+# ------------------------------------------------------------------
+plt.figure(figsize=(16, 9))
+ax = sns.heatmap(conn_heatmap_mat, cmap="coolwarm", center=0)
+
+for b in boundaries_conn:
+    ax.vlines(b, *ax.get_ylim(), colors="black", linewidth=2)
+
+# put cluster labels at centers
+cluster_centers_conn = []
+start = 0
+for size in cluster_sizes_conn.values:
+    cluster_centers_conn.append(start + size / 2)
+    start += size
+
+ax.set_xticks(cluster_centers_conn)
+ax.set_xticklabels([f"C{c}" for c in cluster_sizes_conn.index], rotation=0)
+
+plt.title("Top 20 connection SHAP values ordered by existing clusters")
+plt.xlabel("Subjects grouped by cluster")
+plt.ylabel("Connections")
+plt.tight_layout()
+plt.savefig(
+    os.path.join(cluster_plot_dir, "heatmap_top20_connections_ordered_by_cluster.png"),
+    dpi=300,
+    bbox_inches="tight"
+)
+plt.show()
+plt.close()
+
+# ------------------------------------------------------------------
+# 7) PREPARE REGION SCORES PER SUBJECT
+# ------------------------------------------------------------------
+edge_shap_subject_mat = df_shap[shap_feature_cols].values  # [n_subjects x n_edges]
+region_subject_scores = np.zeros((edge_shap_subject_mat.shape[0], 84), dtype=float)
+
+for e_idx, (i, j) in enumerate(edge_pairs_1based):
+    region_subject_scores[:, i - 1] += np.abs(edge_shap_subject_mat[:, e_idx])
+    region_subject_scores[:, j - 1] += np.abs(edge_shap_subject_mat[:, e_idx])
+
+region_subject_df = pd.DataFrame(
+    region_subject_scores,
+    columns=[clean_region_name(ROI_NAME_MAP[i]) for i in range(1, 85)]
+)
+
+region_subject_df["Subject_ID_fixed"] = df_shap["Subject_ID_fixed"].values
+
+# top regions already computed above in region_importance_df
+top_region_names = region_importance_df["Feature"].head(20).tolist()
+
+region_plot_df = region_subject_df.merge(
+    df_clusters[["Subject_ID_fixed", cluster_col]],
+    on="Subject_ID_fixed",
+    how="left"
+)
+
+region_plot_df = region_plot_df.dropna(subset=[cluster_col]).copy()
+region_plot_df[cluster_col] = region_plot_df[cluster_col].astype(int)
+
+region_plot_df = region_plot_df.sort_values([cluster_col, "Subject_ID_fixed"]).reset_index(drop=True)
+
+region_heatmap_mat = region_plot_df[top_region_names].T
+
+cluster_sizes_region = region_plot_df[cluster_col].value_counts().sort_index()
+boundaries_region = np.cumsum(cluster_sizes_region.values)[:-1]
+
+# ------------------------------------------------------------------
+# 8) PLOT TOP REGIONS HEATMAP ORDERED BY CLUSTER
+# ------------------------------------------------------------------
+plt.figure(figsize=(16, 9))
+ax = sns.heatmap(region_heatmap_mat, cmap="viridis")
+
+for b in boundaries_region:
+    ax.vlines(b, *ax.get_ylim(), colors="white", linewidth=2)
+
+cluster_centers_region = []
+start = 0
+for size in cluster_sizes_region.values:
+    cluster_centers_region.append(start + size / 2)
+    start += size
+
+ax.set_xticks(cluster_centers_region)
+ax.set_xticklabels([f"C{c}" for c in cluster_sizes_region.index], rotation=0)
+
+plt.title("Top 20 region scores ordered by existing clusters")
+plt.xlabel("Subjects grouped by cluster")
+plt.ylabel("Regions")
+plt.tight_layout()
+plt.savefig(
+    os.path.join(cluster_plot_dir, "heatmap_top20_regions_ordered_by_cluster.png"),
+    dpi=300,
+    bbox_inches="tight"
+)
+plt.show()
+plt.close()
+
+# ------------------------------------------------------------------
+# 9) SAVE SUBJECT ORDER USED IN THE HEATMAPS
+# ------------------------------------------------------------------
+conn_plot_df[["Subject_ID_fixed", cluster_col]].to_csv(
+    os.path.join(cluster_plot_dir, "subject_order_connections_heatmap.csv"),
+    index=False
+)
+
+region_plot_df[["Subject_ID_fixed", cluster_col]].to_csv(
+    os.path.join(cluster_plot_dir, "subject_order_regions_heatmap.csv"),
+    index=False
+)
+
+# ------------------------------------------------------------------
+# 10) OPTIONAL: CLUSTER-WISE AVERAGE HEATMAPS
+# ------------------------------------------------------------------
+conn_cluster_mean_df = conn_plot_df.groupby(cluster_col)[top_conn_cols].mean().T
+conn_cluster_mean_df.index = top_conn_names
+
+plt.figure(figsize=(10, 8))
+sns.heatmap(conn_cluster_mean_df, cmap="coolwarm", center=0)
+plt.title("Mean top-connection SHAP per cluster")
+plt.xlabel("Cluster")
+plt.ylabel("Connections")
+plt.tight_layout()
+plt.savefig(
+    os.path.join(cluster_plot_dir, "heatmap_mean_top_connections_per_cluster.png"),
+    dpi=300,
+    bbox_inches="tight"
+)
+plt.show()
+plt.close()
+
+region_cluster_mean_df = region_plot_df.groupby(cluster_col)[top_region_names].mean().T
+
+plt.figure(figsize=(10, 8))
+sns.heatmap(region_cluster_mean_df, cmap="viridis")
+plt.title("Mean top-region score per cluster")
+plt.xlabel("Cluster")
+plt.ylabel("Regions")
+plt.tight_layout()
+plt.savefig(
+    os.path.join(cluster_plot_dir, "heatmap_mean_top_regions_per_cluster.png"),
+    dpi=300,
+    bbox_inches="tight"
+)
+plt.show()
+plt.close()
+
+# ------------------------------------------------------------------
+# 11) SAVE TABLES
+# ------------------------------------------------------------------
+conn_cluster_mean_df.to_csv(
+    os.path.join(cluster_plot_dir, "mean_top_connections_per_cluster.csv")
+)
+
+region_cluster_mean_df.to_csv(
+    os.path.join(cluster_plot_dir, "mean_top_regions_per_cluster.csv")
+)
+
+print("\n=== DONE: HEATMAPS ORDERED BY EXISTING CLUSTERS SAVED IN ===")
+print(cluster_plot_dir)
