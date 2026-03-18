@@ -165,7 +165,7 @@ lookup["Structure"] = (
     .str.replace('"', "", regex=False)
 )
 
-required_cols = {"index2", "Structure"}
+required_cols = {"index", "Structure"}
 if not required_cols.issubset(set(lookup.columns)):
     raise ValueError(
         f"Lookup file must contain columns {required_cols}. "
@@ -175,13 +175,13 @@ if not required_cols.issubset(set(lookup.columns)):
 
 centroid_df["Label"] = pd.to_numeric(centroid_df["Label"], errors="coerce").astype(int)
 
-lookup["index2"] = pd.to_numeric(lookup["index2"], errors="coerce")
+lookup["index"] = pd.to_numeric(lookup["index"], errors="coerce")
 
 final_df = pd.merge(
     centroid_df,
     lookup,
     left_on="Label",
-    right_on="index2",
+    right_on="index",
     how="inner"
 )
 
@@ -534,3 +534,221 @@ print(f"Saved paper Excel: {paper_xlsx}")
 # Print preview
 print("\nPaper-ready table preview:")
 print(paper_df.head(15))
+
+
+# =========================================================
+# 9) ADDITIONAL COLORED NODE VERSIONS + REGION COLOR INDEX
+# =========================================================
+
+import matplotlib.colors as mcolors
+from matplotlib.lines import Line2D
+
+print("\nBuilding additional colored-node versions...")
+
+# ---------------------------------------------------------
+# A) CREATE A FIXED COLOR FOR EACH REGION
+#    with brighter colors for RIGHT hemisphere regions
+# ---------------------------------------------------------
+
+all_regions_sorted = sorted(region_name_to_coords.keys())
+
+left_regions = [r for r in all_regions_sorted if r.startswith("Left-") or r.startswith("ctx-lh-")]
+right_regions = [r for r in all_regions_sorted if r.startswith("Right-") or r.startswith("ctx-rh-")]
+other_regions = [r for r in all_regions_sorted if r not in left_regions and r not in right_regions]
+
+# LEFT / others: keep softer, varied colors
+left_color_pool = []
+for cmap in [plt.cm.tab20, plt.cm.tab20b, plt.cm.tab20c]:
+    left_color_pool.extend([mcolors.to_hex(cmap(i)) for i in range(cmap.N)])
+
+# RIGHT: bright, vivid colors chosen by hand
+# separados de los típicos azules/naranjas/verdes suaves para que se distingan
+right_color_pool = [
+    "#ff1744",  # rojo vivo
+    "#00e5ff",  # cian brillante
+    "#ffc400",  # ámbar
+    "#651fff",  # violeta intenso
+    "#00e676",  # verde brillante
+    "#ff6d00",  # naranja fuerte
+    "#d500f9",  # magenta intenso
+    "#00b0ff",  # azul celeste fuerte
+    "#c6ff00",  # lima
+    "#ff4081",  # rosa fuerte
+    "#1de9b6",  # turquesa
+    "#7c4dff",  # púrpura brillante
+    "#ffea00",  # amarillo vivo
+    "#18ffff",  # aqua neón
+    "#ff5252",  # coral fuerte
+    "#69f0ae",  # verde menta
+    "#e040fb",  # fucsia-violeta
+    "#40c4ff",  # azul claro brillante
+    "#aeea00",  # verde ácido
+    "#ffab00",  # dorado
+    "#f50057",  # frambuesa
+    "#536dfe",  # azul eléctrico
+    "#64dd17",  # verde césped
+    "#ff9100",  # naranja brillante
+    "#aa00ff",  # morado neón
+    "#00bfa5",  # teal fuerte
+    "#ffd600",  # amarillo dorado
+    "#304ffe",  # azul intenso
+    "#ff3d00",  # rojo anaranjado
+    "#76ff03",  # lima brillante
+    "#ec407a",  # rosa saturado
+    "#26c6da",  # cyan medio
+    "#8e24aa",  # morado fuerte
+    "#9ccc65",  # verde claro
+    "#ffa000",  # ámbar oscuro
+]
+
+# OTHER: neutral/darker extras just in case
+other_color_pool = [
+    "#8d6e63", "#607d8b", "#795548", "#9e9e9e", "#546e7a",
+    "#6d4c41", "#78909c", "#5d4037", "#757575", "#455a64"
+]
+
+region_to_color = {}
+
+for i, region in enumerate(left_regions):
+    region_to_color[region] = left_color_pool[i % len(left_color_pool)]
+
+for i, region in enumerate(right_regions):
+    region_to_color[region] = right_color_pool[i % len(right_color_pool)]
+
+for i, region in enumerate(other_regions):
+    region_to_color[region] = other_color_pool[i % len(other_color_pool)]
+
+# tabla índice color-región
+color_index_df = pd.DataFrame({
+    "Region": all_regions_sorted,
+    "Color": [region_to_color[r] for r in all_regions_sorted],
+    "Hemisphere": [
+        "Left" if r in left_regions else
+        "Right" if r in right_regions else
+        "Other"
+        for r in all_regions_sorted
+    ]
+})
+
+color_index_csv = os.path.join(OUT_DIR, "region_color_index.csv")
+color_index_xlsx = os.path.join(OUT_DIR, "region_color_index.xlsx")
+
+color_index_df.to_csv(color_index_csv, index=False)
+color_index_df.to_excel(color_index_xlsx, index=False)
+
+print(f"Saved region color index CSV: {color_index_csv}")
+print(f"Saved region color index Excel: {color_index_xlsx}")
+
+# ---------------------------------------------------------
+# B) SAVE A VISUAL LEGEND AS PNG
+# ---------------------------------------------------------
+
+legend_fig_height = max(12, len(all_regions_sorted) * 0.28)
+fig, ax = plt.subplots(figsize=(10, legend_fig_height))
+
+y_positions = np.arange(len(all_regions_sorted))[::-1]
+
+for y, region in zip(y_positions, all_regions_sorted):
+    ax.scatter(0, y, s=120, color=region_to_color[region])
+    ax.text(0.15, y, region, va="center", fontsize=9)
+
+ax.set_xlim(-0.2, 3.5)
+ax.set_ylim(-1, len(all_regions_sorted))
+ax.axis("off")
+ax.set_title("Region Color Index", fontsize=14)
+
+legend_png = os.path.join(OUT_DIR, "region_color_index.png")
+plt.tight_layout()
+plt.savefig(legend_png, dpi=300, bbox_inches="tight")
+plt.show()
+
+print(f"Saved region color legend PNG: {legend_png}")
+
+# ---------------------------------------------------------
+# C) COLORED VERSION OF MAIN GLASS BRAIN
+# ---------------------------------------------------------
+
+main_node_colors = [region_to_color[r] for r in regions_involved]
+
+display_colored = plotting.plot_connectome(
+    con_matrix,
+    coords,
+    edge_threshold="0%",
+    node_color=main_node_colors,
+    node_size=70,
+    edge_cmap=plt.cm.bwr,
+    edge_vmin=-edge_max,
+    edge_vmax=edge_max,
+    colorbar=True,
+    title="Top SHAP connections"
+)
+
+out_png_colored = os.path.join(
+    OUT_DIR,
+    "glass_brain_dti_top10_addecode_signed_colored.png"
+)
+display_colored.savefig(out_png_colored)
+plt.show()
+
+print(f"Saved colored main glass brain: {out_png_colored}")
+
+# ---------------------------------------------------------
+# D) COLORED VERSIONS OF HEMISPHERE-SPECIFIC GLASS BRAINS
+# ---------------------------------------------------------
+
+brain_sets_colored = [
+    (top_left, "Left hemisphere connections"),
+    (top_right, "Right hemisphere connections"),
+    (top_inter, "Interhemispheric connections")
+]
+
+for df_set, title in brain_sets_colored:
+
+    if df_set.empty:
+        print(f"No connections for {title}")
+        continue
+
+    regions = list(set(df_set["Region_1"]) | set(df_set["Region_2"]))
+    region_to_index_subset = {r: i for i, r in enumerate(regions)}
+
+    coords_subset = [region_name_to_coords[r] for r in regions]
+    node_colors_subset = [region_to_color[r] for r in regions]
+
+    n_subset = len(regions)
+    con_matrix_subset = np.zeros((n_subset, n_subset))
+
+    for _, row in df_set.iterrows():
+        i = region_to_index_subset[row["Region_1"]]
+        j = region_to_index_subset[row["Region_2"]]
+        con_matrix_subset[i, j] = row["PlotWeight"]
+        con_matrix_subset[j, i] = row["PlotWeight"]
+
+    edge_max_subset = np.max(np.abs(con_matrix_subset))
+
+    display_colored_subset = plotting.plot_connectome(
+        con_matrix_subset,
+        coords_subset,
+        edge_threshold="0%",
+        node_color=node_colors_subset,
+        node_size=70,
+        edge_cmap=plt.cm.bwr,
+        edge_vmin=-edge_max_subset,
+        edge_vmax=edge_max_subset,
+        colorbar=True,
+        title=title 
+    )
+
+    if "Left" in title:
+        fname_colored = "glass_brain_top_left_colored.png"
+    elif "Right" in title:
+        fname_colored = "glass_brain_top_right_colored.png"
+    else:
+        fname_colored = "glass_brain_top_interhemispheric_colored.png"
+
+    out_file_colored = os.path.join(TABLES_OUT_DIR, fname_colored)
+    display_colored_subset.savefig(out_file_colored)
+    plt.show()
+
+    print(f"Saved colored glass brain: {out_file_colored}")
+
+print("\nDone. Gray versions were kept, and additional colored versions were created.")
