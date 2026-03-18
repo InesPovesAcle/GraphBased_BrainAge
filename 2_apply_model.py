@@ -998,4 +998,75 @@ plt.savefig(save_path, dpi=300)
 plt.show()
 
 print("Saved:", save_path)
-print("\nDone.")
+
+# ============================================================
+# (AÑADIR) UFOV2: adjuntar a df_preds_aligned + correlación/plots
+#   - Busca UFOV2 en el metadata
+#   - Lo añade a df_preds_aligned por MRI_Exam_fixed
+#   - Hace plot uniforme y guarda PNG
+# ============================================================
+
+print("\nUFOV2\n")
+
+# 1) Detectar columna UFOV2 (robusto a mayúsculas/guiones/underscores)
+def find_col_like(df, target="ufov2"):
+    def norm(s):  # normaliza: ufov_2, UFOV2, uFov-2 -> ufov2
+        return re.sub(r"[^a-z0-9]+", "", str(s).lower())
+    target_n = norm(target)
+    for c in df.columns:
+        if norm(c) == target_n:
+            return c
+    # fallback: si contiene ufov y 2
+    for c in df.columns:
+        cn = norm(c)
+        if "ufov" in cn and cn.endswith("2"):
+            return c
+    return None
+
+ufov2_col = find_col_like(addecode_metadata_pca, "ufov2")
+if ufov2_col is None:
+    print("[WARN] No encontré una columna UFOV2 en addecode_metadata_pca. Columnas candidatas similares:")
+    cands = [c for c in addecode_metadata_pca.columns if "ufov" in str(c).lower()]
+    print(cands[:30])
+else:
+    print("Usando columna:", ufov2_col)
+
+    # 2) Adjuntar UFOV2 a df_preds_aligned por MRI_Exam_fixed
+    tmp = addecode_metadata_pca[["MRI_Exam_fixed", ufov2_col]].copy()
+    tmp["MRI_Exam_fixed"] = tmp["MRI_Exam_fixed"].astype(str).str.zfill(5)
+    tmp[ufov2_col] = pd.to_numeric(tmp[ufov2_col], errors="coerce")
+
+    # si ya existe, la sobreescribimos con la versión numérica “limpia”
+    df_preds_aligned = df_preds_aligned.merge(
+        tmp.rename(columns={ufov2_col: "UFOV2"}),
+        on="MRI_Exam_fixed",
+        how="left",
+        suffixes=("", "_dup"),
+    )
+    # por si quedó duplicada accidentalmente
+    if "UFOV2_dup" in df_preds_aligned.columns:
+        df_preds_aligned["UFOV2"] = df_preds_aligned["UFOV2"].fillna(df_preds_aligned["UFOV2_dup"])
+        df_preds_aligned = df_preds_aligned.drop(columns=["UFOV2_dup"])
+
+    print("Missing UFOV2:", int(df_preds_aligned["UFOV2"].isna().sum()))
+
+    # 3) Correlación + plot uniforme (cBAG vs UFOV2)
+    # Nota: UFOV suele estar en ms (más alto = peor), así que espera correlación negativa si cBAG ~ peor envejecimiento.
+    regplot_and_save(
+        df=df_preds_aligned,
+        x="UFOV2",
+        y="cBAG",
+        title="cBAG vs UFOV2",
+        out_png=os.path.join(RESULTS_DIR, "cBAG_vs_UFOV2.png"),
+        add_hline0=True,
+    )
+
+    # (Opcional) sanity: UFOV2 vs Age
+    regplot_and_save(
+        df=df_preds_aligned,
+        x="Age",
+        y="UFOV2",
+        title="UFOV2 vs Age",
+        out_png=os.path.join(RESULTS_DIR, "UFOV2_vs_Age.png"),
+        add_hline0=False,
+    )
